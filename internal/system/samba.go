@@ -1,0 +1,302 @@
+package system
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
+
+	"github.com/wraithos/wraith-ui/internal/storage"
+)
+
+var validServerName = regexp.MustCompile(`^[\w.\-]+$`)
+
+// SambaMount represents a configured SMB/CIFS mount.
+type SambaMount struct {
+	ID         string `json:"id"`
+	Server     string `json:"server"`
+	Share      string `json:"share"`
+	MountPoint string `json:"mountpoint"`
+	Username   string `json:"username"`
+	Password   string `json:"password,omitempty"`
+	Options    string `json:"options,omitempty"`
+	Mounted    bool   `json:"mounted"`
+}
+
+// SambaConfig holds all configured mounts.
+type SambaConfig struct {
+	Mounts []SambaMount `json:"mounts"`
+}
+
+// SambaManager manages CIFS mounts.
+type SambaManager struct {
+	mu sync.Mutex
+}
+
+// NewSambaManager creates a new Samba mount manager.
+func NewSambaManager() *SambaManager {
+	return &SambaManager{}
+}
+
+// ListMounts returns all configured mounts with current mount status.
+func (m *SambaManager) ListMounts() ([]SambaMount, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cfg, err := m.loadConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	// Update mounted status from system
+	mounted := getActiveMounts()
+	for i := range cfg.Mounts {
+		cfg.Mounts[i].Mounted = mounted[cfg.Mounts[i].MountPoint]
+		// Never expose passwords in list responses
+		cfg.Mounts[i].Password = ""
+	}
+
+	return cfg.Mounts, nil
+}
+
+// AddMount adds a new Samba mount configuration.
+func (m *SambaManager) AddMount(mount SambaMount) (*SambaMount, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if mount.Server == "" || mount.Share == "" {
+		return nil, fmt.Errorf("server and share are required")
+	}
+
+	// Validate server name to prevent injection
+	if !validServerName.MatchString(mount.Server) {
+		return nil, fmt.Errorf("invalid server name: must contain only alphanumeric, dot, hyphen, or underscore characters")
+	}
+
+	// Validate username and password don't contain characters that could inject mount options
+	if err := validateCredential(mount.Username, "username"); err != nil {
+		return nil, err
+	}
+	if err := validateCredential(mount.Password, "password"); err != nil {
+		return nil, err
+	}
+
+	cfg, err := m.loadConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	// Generate ID from server and share
+	mount.ID = fmt.Sprintf("%s_%s", sanitizeID(mount.Server), sanitizeID(mount.Share))
+
+	// Check for duplicate
+	for _, existing := range cfg.Mounts {
+		if existing.ID == mount.ID {
+			return nil, fmt.Errorf("mount %s already exists", mount.ID)
+		}
+	}
+
+	// Set default mount point
+	if mount.MountPoint == "" {
+		mount.MountPoint = storage.MountsDir() + "/" + mount.ID
+	}
+
+	// Validate mount point is within allowed directory to prevent path traversal
+	cleanPath := filepath.Clean(mount.MountPoint)
+	mountsDir := storage.MountsDir()
+	if !strings.HasPrefix(cleanPath, mountsDir+"/") && cleanPath != mountsDir {
+		return nil, fmt.Errorf("mount point must be within %s", mountsDir)
+	}
+	mount.MountPoint = cleanPath
+
+	cfg.Mounts = append(cfg.Mounts, mount)
+	if err := storage.WriteJSON(storage.SambaFile(), cfg); err != nil {
+		return nil, fmt.Errorf("save config: %w", err)
+	}
+
+	// Don't return the password
+	result := mount
+	result.Password = ""
+	return &result, nil
+}
+
+// RemoveMount removes a mount configuration and unmounts if active.
+func (m *SambaManager) RemoveMount(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cfg, err := m.loadConfig()
+	if err != nil {
+		return err
+	}
+
+	found := false
+	var updated []SambaMount
+	for _, mount := range cfg.Mounts {
+		if mount.ID == id {
+			found = true
+			// Unmount if currently mounted
+			if isMounted(mount.MountPoint) {
+				exec.Command("umount", mount.MountPoint).Run()
+			}
+			continue
+		}
+		updated = append(updated, mount)
+	}
+
+	if !found {
+		return fmt.Errorf("mount %s not found", id)
+	}
+
+	cfg.Mounts = updated
+	return storage.WriteJSON(storage.SambaFile(), cfg)
+}
+
+// Mount activates a configured mount.
+func (m *SambaManager) Mount(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cfg, err := m.loadConfig()
+	if err != nil {
+		return err
+	}
+
+	mount, err := m.findMount(cfg, id)
+	if err != nil {
+		return err
+	}
+
+	// Create mount point directory
+	if err := os.MkdirAll(mount.MountPoint, 0755); err != nil {
+		return fmt.Errorf("create mount point: %w", err)
+	}
+
+	// Build mount.cifs command using credentials file for security
+	source := fmt.Sprintf("//%s/%s", mount.Server, mount.Share)
+	opts := "iocharset=utf8"
+
+	var credFile *os.File
+	if mount.Username != "" {
+		// Write credentials to a temp file with restricted permissions
+		var err error
+		credFile, err = os.CreateTemp("", "cifs-cred-*")
+		if err != nil {
+			return fmt.Errorf("create credentials file: %w", err)
+		}
+		defer os.Remove(credFile.Name())
+		defer credFile.Close()
+
+		if err := os.Chmod(credFile.Name(), 0600); err != nil {
+			return fmt.Errorf("chmod credentials file: %w", err)
+		}
+
+		credContent := fmt.Sprintf("username=%s\n", mount.Username)
+		if mount.Password != "" {
+			credContent += fmt.Sprintf("password=%s\n", mount.Password)
+		}
+		if _, err := credFile.WriteString(credContent); err != nil {
+			return fmt.Errorf("write credentials file: %w", err)
+		}
+		credFile.Close()
+
+		opts += ",credentials=" + credFile.Name()
+	} else {
+		opts += ",guest"
+	}
+
+	cmd := exec.Command("mount.cifs", source, mount.MountPoint, "-o", opts)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("mount.cifs failed: %s: %w", strings.TrimSpace(string(output)), err)
+	}
+
+	return nil
+}
+
+// Unmount deactivates a configured mount.
+func (m *SambaManager) Unmount(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cfg, err := m.loadConfig()
+	if err != nil {
+		return err
+	}
+
+	mount, err := m.findMount(cfg, id)
+	if err != nil {
+		return err
+	}
+
+	if !isMounted(mount.MountPoint) {
+		return fmt.Errorf("mount %s is not currently mounted", id)
+	}
+
+	output, err := exec.Command("umount", mount.MountPoint).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("umount failed: %s: %w", strings.TrimSpace(string(output)), err)
+	}
+
+	return nil
+}
+
+func (m *SambaManager) loadConfig() (*SambaConfig, error) {
+	cfg := &SambaConfig{}
+	if !storage.Exists(storage.SambaFile()) {
+		return cfg, nil
+	}
+	if err := storage.ReadJSON(storage.SambaFile(), cfg); err != nil {
+		return nil, fmt.Errorf("read samba config: %w", err)
+	}
+	return cfg, nil
+}
+
+func (m *SambaManager) findMount(cfg *SambaConfig, id string) (*SambaMount, error) {
+	for i := range cfg.Mounts {
+		if cfg.Mounts[i].ID == id {
+			return &cfg.Mounts[i], nil
+		}
+	}
+	return nil, fmt.Errorf("mount %s not found", id)
+}
+
+func getActiveMounts() map[string]bool {
+	result := make(map[string]bool)
+	data, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		return result
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[2] == "cifs" {
+			result[fields[1]] = true
+		}
+	}
+	return result
+}
+
+func isMounted(path string) bool {
+	mounts := getActiveMounts()
+	return mounts[path]
+}
+
+func validateCredential(value, field string) error {
+	if value == "" {
+		return nil
+	}
+	if strings.ContainsAny(value, ",\n\r") {
+		return fmt.Errorf("invalid %s: must not contain commas or newlines", field)
+	}
+	return nil
+}
+
+func sanitizeID(s string) string {
+	s = strings.ReplaceAll(s, ".", "_")
+	s = strings.ReplaceAll(s, "/", "_")
+	s = strings.ReplaceAll(s, " ", "_")
+	return strings.ToLower(s)
+}

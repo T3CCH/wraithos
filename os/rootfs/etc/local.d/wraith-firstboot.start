@@ -1,0 +1,58 @@
+#!/bin/sh
+# wraith-firstboot.start - First boot detection and setup
+#
+# Runs on every boot via local.d, but only performs setup work
+# on the very first boot (when the sentinel file doesn't exist).
+# Creates initial config structure and sets secure defaults.
+
+set -e
+
+WRAITH_CONFIG_DIR="/wraith/config"
+SENTINEL="$WRAITH_CONFIG_DIR/.initialized"
+
+# Only run once
+if [ -f "$SENTINEL" ]; then
+    exit 0
+fi
+
+echo "[wraith-firstboot] First boot detected -- running initial setup"
+
+# Ensure config directory structure
+mkdir -p "$WRAITH_CONFIG_DIR/compose"
+mkdir -p "$WRAITH_CONFIG_DIR/backup"
+
+# Generate machine ID for this instance
+if [ ! -f "$WRAITH_CONFIG_DIR/machine-id" ]; then
+    # Use /dev/urandom since we may not have uuidgen
+    head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$WRAITH_CONFIG_DIR/machine-id"
+    echo "" >> "$WRAITH_CONFIG_DIR/machine-id"
+    echo "[wraith-firstboot] Generated machine ID"
+fi
+
+# Set up default network config (DHCP)
+if [ ! -f "$WRAITH_CONFIG_DIR/network.json" ]; then
+    cat > "$WRAITH_CONFIG_DIR/network.json" <<'EOF'
+{
+    "mode": "dhcp",
+    "interface": "eth0"
+}
+EOF
+    echo "[wraith-firstboot] Created default network config (DHCP)"
+fi
+
+# Empty samba mounts config
+if [ ! -f "$WRAITH_CONFIG_DIR/samba.json" ]; then
+    cat > "$WRAITH_CONFIG_DIR/samba.json" <<'EOF'
+{
+    "mounts": []
+}
+EOF
+    echo "[wraith-firstboot] Created empty Samba config"
+fi
+
+# Set restrictive permissions on config directory
+chmod 700 "$WRAITH_CONFIG_DIR"
+
+# Write sentinel file with timestamp
+date -u '+%Y-%m-%dT%H:%M:%SZ' > "$SENTINEL"
+echo "[wraith-firstboot] Initial setup complete"

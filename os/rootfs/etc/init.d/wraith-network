@@ -1,0 +1,207 @@
+#!/sbin/openrc-run
+# wraith-network - Network configuration for WraithOS
+#
+# Reads network config from the config disk. Supports DHCP (default)
+# and static IP configuration. Sets up a basic nftables firewall.
+
+description="Configure WraithOS networking and firewall"
+
+# Load configuration
+. /etc/conf.d/wraith
+
+depend() {
+    need wraith-disks
+    before wraith-docker wraith-samba wraith-ui
+    provide net
+}
+
+# Parse a JSON value from a file using grep/sed (no jq in minimal Alpine).
+# This handles simple flat JSON only -- sufficient for network.json.
+# Args: file key
+json_value() {
+    local file="$1"
+    local key="$2"
+    sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$file" | head -1
+}
+
+configure_dhcp() {
+    local iface="$1"
+
+    einfo "Configuring $iface with DHCP"
+
+    # Use udhcpc (busybox DHCP client, always available in Alpine)
+    udhcpc -i "$iface" -b -q -S \
+        -s /usr/share/udhcpc/default.script \
+        2>/dev/null || {
+        ewarn "DHCP failed on $iface -- network may be unavailable"
+        return 1
+    }
+}
+
+configure_static() {
+    local iface="$1"
+    local address="$2"
+    local gateway="$3"
+    local dns="$4"
+
+    einfo "Configuring $iface with static IP: $address"
+
+    ip addr flush dev "$iface" 2>/dev/null || true
+    ip addr add "$address" dev "$iface" || {
+        eerror "Failed to set IP address $address on $iface"
+        return 1
+    }
+
+    ip link set "$iface" up
+
+    if [ -n "$gateway" ]; then
+        ip route add default via "$gateway" dev "$iface" || {
+            ewarn "Failed to set default gateway $gateway"
+        }
+    fi
+
+    if [ -n "$dns" ]; then
+        # Write DNS config; support comma-separated list
+        : > /etc/resolv.conf
+        echo "$dns" | tr ',' '\n' | while read -r server; do
+            server=$(echo "$server" | tr -d ' ')
+            [ -n "$server" ] && echo "nameserver $server" >> /etc/resolv.conf
+        done
+    fi
+}
+
+# Set up nftables firewall rules.
+# Policy: allow outbound, allow established inbound, allow port 82 (web UI),
+# drop everything else inbound.
+setup_firewall() {
+    einfo "Configuring nftables firewall"
+
+    # Check if nftables is available
+    command -v nft >/dev/null 2>&1 || {
+        ewarn "nft not found -- skipping firewall setup"
+        return 0
+    }
+
+    nft flush ruleset 2>/dev/null || true
+
+    nft -f - <<'NFTABLES'
+table inet filter {
+    chain input {
+        type filter hook input priority 0; policy drop;
+
+        # Allow loopback
+        iif "lo" accept
+
+        # Allow established/related connections
+        ct state established,related accept
+
+        # Allow ICMP (ping)
+        ip protocol icmp accept
+        ip6 nexthdr ipv6-icmp accept
+
+        # Allow SSH (for emergency access)
+        tcp dport 22 accept
+
+        # Allow WraithOS web UI
+        tcp dport 82 accept
+
+        # Allow DHCP client
+        udp sport 67 udp dport 68 accept
+
+        # Drop everything else (logged)
+        log prefix "[wraith-fw-drop] " drop
+    }
+
+    chain forward {
+        type filter hook forward priority 0; policy accept;
+        # Docker manages its own forwarding rules
+    }
+
+    chain output {
+        type filter hook output priority 0; policy accept;
+    }
+}
+NFTABLES
+
+    if [ $? -ne 0 ]; then
+        ewarn "Failed to apply firewall rules"
+        return 1
+    fi
+}
+
+start() {
+    ebegin "Configuring WraithOS network"
+
+    local iface="$WRAITH_NET_INTERFACE"
+    local mode="$WRAITH_NET_MODE"
+    local config_file="$WRAITH_CONFIG_DIR/network.json"
+
+    # Ensure interface is up
+    ip link set "$iface" up 2>/dev/null || {
+        eerror "Network interface $iface not found"
+        eend 1
+        return 1
+    }
+
+    # Read config from disk if available
+    if [ -f "$config_file" ]; then
+        local file_mode
+        file_mode=$(json_value "$config_file" "mode")
+        [ -n "$file_mode" ] && mode="$file_mode"
+    fi
+
+    case "$mode" in
+        static)
+            local address gateway dns
+            address=$(json_value "$config_file" "address")
+            gateway=$(json_value "$config_file" "gateway")
+            dns=$(json_value "$config_file" "dns")
+
+            if [ -z "$address" ]; then
+                ewarn "Static mode but no address configured -- falling back to DHCP"
+                configure_dhcp "$iface"
+            else
+                configure_static "$iface" "$address" "$gateway" "$dns"
+            fi
+            ;;
+        dhcp|*)
+            configure_dhcp "$iface"
+            ;;
+    esac
+
+    setup_firewall
+
+    eend 0
+}
+
+stop() {
+    ebegin "Stopping WraithOS network"
+
+    local iface="$WRAITH_NET_INTERFACE"
+
+    # Flush firewall
+    nft flush ruleset 2>/dev/null || true
+
+    # Release DHCP lease
+    if [ -f "/var/run/udhcpc.$iface.pid" ]; then
+        kill "$(cat "/var/run/udhcpc.$iface.pid")" 2>/dev/null || true
+    fi
+
+    ip addr flush dev "$iface" 2>/dev/null || true
+
+    eend 0
+}
+
+status() {
+    local iface="$WRAITH_NET_INTERFACE"
+
+    if ip addr show "$iface" 2>/dev/null | grep -q "inet "; then
+        local addr
+        addr=$(ip -4 addr show "$iface" | grep -o 'inet [^ ]*' | head -1)
+        einfo "Network ($iface): UP - $addr"
+        return 0
+    else
+        eerror "Network ($iface): DOWN"
+        return 1
+    fi
+}

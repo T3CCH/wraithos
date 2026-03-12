@@ -1,0 +1,30 @@
+# /etc/conf.d/wraith - Configuration variables for all wraith services
+#
+# These defaults are used when no config disk is found or when
+# config values are missing. Override by editing this file or
+# by placing config on the WRAITH-CONFIG labeled disk.
+
+# Disk labels used to find config and cache partitions
+WRAITH_CONFIG_LABEL="WRAITH-CONFIG"
+WRAITH_CACHE_LABEL="WRAITH-CACHE"
+
+# Mount points
+WRAITH_CONFIG_DIR="/wraith/config"
+WRAITH_CACHE_DIR="/wraith/cache"
+
+# Docker settings
+WRAITH_DOCKER_DATA_ROOT="/wraith/cache/docker"
+WRAITH_DOCKER_LOG_MAX_SIZE="10m"
+WRAITH_DOCKER_LOG_MAX_FILE="3"
+WRAITH_DOCKER_DNS="8.8.8.8"
+
+# Network defaults
+WRAITH_NET_INTERFACE="eth0"
+WRAITH_NET_MODE="dhcp"
+
+# Web UI
+WRAITH_UI_PORT="82"
+WRAITH_UI_BINARY="/usr/bin/wraith-ui"
+
+# Samba mount base directory
+WRAITH_SAMBA_MOUNT_DIR="/wraith/cache/mounts"

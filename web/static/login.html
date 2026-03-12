@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WraithOS</title>
+<link rel="stylesheet" href="/css/wraith.css">
+<style>.login-version{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);font-size:.72rem;color:var(--tx-m);font-family:var(--mono)}</style>
+</head>
+<body>
+<div class="login-wrap"><div class="login-card">
+<div class="login-brand"><h1>Wraith<span>OS</span></h1><p id="login-sub">System Management</p></div>
+<div id="err" class="login-error hidden"></div>
+<form id="lf">
+<div class="form-group"><label for="pw">Password</label>
+<input type="password" id="pw" autocomplete="current-password" placeholder="Enter password" required autofocus></div>
+<button type="submit" class="btn btn-primary" id="lb">Sign In</button>
+</form>
+<form id="sf" class="hidden">
+<div class="form-group"><label for="np">Create Password</label>
+<input type="password" id="np" autocomplete="new-password" placeholder="Choose a strong password" required></div>
+<div class="form-group"><label for="cp">Confirm Password</label>
+<input type="password" id="cp" autocomplete="new-password" placeholder="Confirm password" required></div>
+<button type="submit" class="btn btn-primary" id="sb">Set Up WraithOS</button>
+<p class="setup-note">First time? Create your admin password to get started.</p>
+</form>
+</div></div>
+<div class="login-version" id="ver">WraithOS</div>
+<script>
+const $=s=>document.querySelector(s),A='/api';
+function showErr(m){const e=$('#err');e.textContent=m;e.classList.remove('hidden');setTimeout(()=>e.classList.add('hidden'),5000)}
+async function post(u,b){return fetch(A+u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})}
+(async()=>{try{const r=await fetch(A+'/auth/status'),d=await r.json();
+if(d.needsSetup){$('#lf').classList.add('hidden');$('#sf').classList.remove('hidden');$('#login-sub').textContent='Initial Setup';$('#np').focus()}
+if(d.version)$('#ver').textContent='WraithOS v'+d.version}catch{}})();
+$('#lf').onsubmit=async e=>{e.preventDefault();const b=$('#lb');b.disabled=true;b.innerHTML='<span class="spinner"></span> Signing in...';
+try{const r=await post('/auth/login',{password:$('#pw').value});if(r.ok)location.href='/';else{const d=await r.json().catch(()=>({}));showErr(d.error||'Invalid password')}}
+catch(x){showErr('Connection failed')}b.disabled=false;b.textContent='Sign In'};
+$('#sf').onsubmit=async e=>{e.preventDefault();const p=$('#np').value,c=$('#cp').value;
+if(p!==c){showErr('Passwords do not match');return}if(p.length<6){showErr('Min 6 characters');return}
+const b=$('#sb');b.disabled=true;b.innerHTML='<span class="spinner"></span> Setting up...';
+try{const r=await post('/auth/setup',{password:p});if(r.ok)location.href='/';else{const d=await r.json().catch(()=>({}));showErr(d.error||'Setup failed')}}
+catch(x){showErr('Connection failed')}b.disabled=false;b.textContent='Set Up WraithOS'};
+</script>
+</body>
+</html>

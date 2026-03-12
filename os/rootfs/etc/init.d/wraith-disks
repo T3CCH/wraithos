@@ -1,0 +1,126 @@
+#!/sbin/openrc-run
+# wraith-disks - Detect and mount config and cache disks by label
+#
+# Config disk (WRAITH-CONFIG): persistent settings, compose files, credentials
+# Cache disk (WRAITH-CACHE): Docker data root, Samba mount points
+#
+# If disks are not found, fallback to tmpfs so the system remains bootable.
+
+description="Detect and mount WraithOS config and cache disks"
+
+# Load configuration
+. /etc/conf.d/wraith
+
+depend() {
+    need localmount
+    before wraith-network wraith-docker wraith-samba wraith-ui
+}
+
+# Find a block device by filesystem label.
+# Returns the device path on stdout, or empty string if not found.
+find_disk_by_label() {
+    local label="$1"
+    local dev
+
+    dev=$(blkid -L "$label" 2>/dev/null) || true
+    echo "$dev"
+}
+
+# Mount a disk, creating the mount point if needed.
+# Args: device mount_point fs_type mount_options
+mount_disk() {
+    local dev="$1"
+    local mnt="$2"
+    local fstype="${3:-ext4}"
+    local opts="${4:-noatime,errors=remount-ro}"
+
+    mkdir -p "$mnt"
+    mount -t "$fstype" -o "$opts" "$dev" "$mnt"
+}
+
+# Set up the config disk directory structure.
+# Creates required subdirectories if they don't exist.
+init_config_layout() {
+    local base="$1"
+
+    mkdir -p "$base/compose"
+    mkdir -p "$base/backup"
+
+    # Ensure key files exist (don't overwrite existing ones)
+    [ -f "$base/network.json" ] || echo '{"mode":"dhcp"}' > "$base/network.json"
+    [ -f "$base/samba.json" ]   || echo '{"mounts":[]}' > "$base/samba.json"
+}
+
+# Set up the cache disk directory structure.
+init_cache_layout() {
+    local base="$1"
+
+    mkdir -p "$base/docker"
+    mkdir -p "$base/mounts"
+}
+
+start() {
+    ebegin "Detecting WraithOS disks"
+
+    local config_dev cache_dev
+    local rc=0
+
+    # --- Config disk ---
+    config_dev=$(find_disk_by_label "$WRAITH_CONFIG_LABEL")
+    if [ -n "$config_dev" ]; then
+        einfo "Config disk found: $config_dev"
+        mount_disk "$config_dev" "$WRAITH_CONFIG_DIR" || {
+            ewarn "Failed to mount config disk $config_dev"
+            rc=1
+        }
+    else
+        ewarn "Config disk ($WRAITH_CONFIG_LABEL) not found -- using tmpfs fallback"
+        mkdir -p "$WRAITH_CONFIG_DIR"
+        mount -t tmpfs -o size=64m,noatime tmpfs "$WRAITH_CONFIG_DIR"
+        ewarn "WARNING: Configuration will not persist across reboots"
+    fi
+    init_config_layout "$WRAITH_CONFIG_DIR"
+
+    # --- Cache disk ---
+    cache_dev=$(find_disk_by_label "$WRAITH_CACHE_LABEL")
+    if [ -n "$cache_dev" ]; then
+        einfo "Cache disk found: $cache_dev"
+        mount_disk "$cache_dev" "$WRAITH_CACHE_DIR" || {
+            ewarn "Failed to mount cache disk $cache_dev"
+            rc=1
+        }
+    else
+        ewarn "Cache disk ($WRAITH_CACHE_LABEL) not found -- Docker will use RAM"
+        mkdir -p "$WRAITH_CACHE_DIR"
+        mount -t tmpfs -o size=1g,noatime tmpfs "$WRAITH_CACHE_DIR"
+        ewarn "WARNING: Docker images and data will not persist across reboots"
+    fi
+    init_cache_layout "$WRAITH_CACHE_DIR"
+
+    eend $rc
+}
+
+stop() {
+    ebegin "Unmounting WraithOS disks"
+
+    # Unmount in reverse order; ignore errors for already-unmounted
+    umount "$WRAITH_CACHE_DIR" 2>/dev/null || true
+    umount "$WRAITH_CONFIG_DIR" 2>/dev/null || true
+
+    eend 0
+}
+
+status() {
+    local config_mounted=false cache_mounted=false
+
+    mountpoint -q "$WRAITH_CONFIG_DIR" 2>/dev/null && config_mounted=true
+    mountpoint -q "$WRAITH_CACHE_DIR" 2>/dev/null && cache_mounted=true
+
+    einfo "Config disk ($WRAITH_CONFIG_DIR): $config_mounted"
+    einfo "Cache disk ($WRAITH_CACHE_DIR): $cache_mounted"
+
+    if $config_mounted && $cache_mounted; then
+        return 0
+    fi
+    return 1
+}

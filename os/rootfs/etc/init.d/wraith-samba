@@ -1,0 +1,158 @@
+#!/sbin/openrc-run
+# wraith-samba - Restore Samba/CIFS mounts from config disk
+#
+# Reads mount definitions from /wraith/config/samba.json and mounts
+# each share. Mounts go to /wraith/cache/mounts/<name> so they can
+# be bind-mounted into Docker containers.
+
+description="Restore WraithOS Samba mounts"
+
+# Load configuration
+. /etc/conf.d/wraith
+
+depend() {
+    need wraith-disks wraith-network
+    before wraith-ui
+}
+
+# Parse simple JSON arrays using sed/grep.
+# This handles the samba.json format:
+# {"mounts":[{"name":"x","server":"y","share":"z","username":"u","password":"p","options":"o"}]}
+#
+# For each mount entry, extracts fields and calls mount_share.
+parse_and_mount() {
+    local config_file="$1"
+
+    [ -f "$config_file" ] || return 0
+
+    # Extract individual mount objects (one per line)
+    # This uses a simple approach: split on },{ to get individual entries
+    local mounts_json
+    mounts_json=$(sed 's/.*"mounts":\[//;s/\].*//' "$config_file" \
+        | sed 's/},{/}\n{/g')
+
+    [ -z "$mounts_json" ] && return 0
+
+    echo "$mounts_json" | while IFS= read -r entry; do
+        [ -z "$entry" ] && continue
+
+        local name server share username password mount_opts
+
+        name=$(echo "$entry"     | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+        server=$(echo "$entry"   | sed -n 's/.*"server"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+        share=$(echo "$entry"    | sed -n 's/.*"share"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+        username=$(echo "$entry" | sed -n 's/.*"username"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+        password=$(echo "$entry" | sed -n 's/.*"password"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+        mount_opts=$(echo "$entry" | sed -n 's/.*"options"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+
+        if [ -z "$name" ] || [ -z "$server" ] || [ -z "$share" ]; then
+            ewarn "Skipping incomplete Samba mount entry"
+            continue
+        fi
+
+        mount_share "$name" "$server" "$share" "$username" "$password" "$mount_opts"
+    done
+}
+
+# Mount a single CIFS share.
+# Args: name server share [username] [password] [extra_options]
+mount_share() {
+    local name="$1"
+    local server="$2"
+    local share="$3"
+    local username="$4"
+    local password="$5"
+    local extra_opts="$6"
+
+    local mount_point="$WRAITH_SAMBA_MOUNT_DIR/$name"
+    local unc="//${server}/${share}"
+
+    # Skip if already mounted
+    if mountpoint -q "$mount_point" 2>/dev/null; then
+        einfo "Samba mount '$name' already mounted"
+        return 0
+    fi
+
+    mkdir -p "$mount_point"
+
+    # Build mount options
+    local opts="noatime,noperm,iocharset=utf8,file_mode=0777,dir_mode=0777"
+    if [ -n "$username" ]; then
+        opts="${opts},username=${username}"
+        if [ -n "$password" ]; then
+            opts="${opts},password=${password}"
+        fi
+    else
+        opts="${opts},guest"
+    fi
+    if [ -n "$extra_opts" ]; then
+        opts="${opts},${extra_opts}"
+    fi
+
+    einfo "Mounting Samba share: $unc -> $mount_point"
+    if mount -t cifs -o "$opts" "$unc" "$mount_point"; then
+        einfo "  Mounted successfully"
+    else
+        ewarn "  Failed to mount $unc -- share may be unavailable"
+        # Don't fail the service; other mounts may succeed
+    fi
+}
+
+start() {
+    ebegin "Restoring Samba mounts"
+
+    local config_file="$WRAITH_CONFIG_DIR/samba.json"
+
+    if [ ! -f "$config_file" ]; then
+        einfo "No Samba configuration found"
+        eend 0
+        return 0
+    fi
+
+    # Check for empty mounts array
+    if grep -q '"mounts":\[\]' "$config_file" 2>/dev/null; then
+        einfo "No Samba mounts configured"
+        eend 0
+        return 0
+    fi
+
+    mkdir -p "$WRAITH_SAMBA_MOUNT_DIR"
+    parse_and_mount "$config_file"
+
+    eend 0
+}
+
+stop() {
+    ebegin "Unmounting Samba shares"
+
+    # Unmount everything under the Samba mount directory
+    if [ -d "$WRAITH_SAMBA_MOUNT_DIR" ]; then
+        for mnt in "$WRAITH_SAMBA_MOUNT_DIR"/*/; do
+            [ -d "$mnt" ] || continue
+            if mountpoint -q "$mnt" 2>/dev/null; then
+                umount -l "$mnt" 2>/dev/null || true
+            fi
+        done
+    fi
+
+    eend 0
+}
+
+status() {
+    local count=0
+
+    if [ -d "$WRAITH_SAMBA_MOUNT_DIR" ]; then
+        for mnt in "$WRAITH_SAMBA_MOUNT_DIR"/*/; do
+            [ -d "$mnt" ] || continue
+            if mountpoint -q "$mnt" 2>/dev/null; then
+                local name
+                name=$(basename "$mnt")
+                einfo "Samba mount '$name': mounted"
+                count=$((count + 1))
+            fi
+        done
+    fi
+
+    einfo "Total active Samba mounts: $count"
+    return 0
+}

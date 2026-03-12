@@ -1,0 +1,193 @@
+// Package api provides the HTTP router, middleware, and API handlers.
+package api
+
+import (
+	"encoding/json"
+	"log"
+	"net/http"
+	"strings"
+
+	"github.com/wraithos/wraith-ui/internal/auth"
+	"github.com/wraithos/wraith-ui/internal/docker"
+	"github.com/wraithos/wraith-ui/internal/system"
+)
+
+// Server holds all dependencies for the API handlers.
+type Server struct {
+	Auth     *auth.Manager
+	Docker   *docker.Client
+	Compose  *docker.ComposeManager
+	Samba    *system.SambaManager
+	Logs     *system.LogCollector
+	Version  string
+	Mux      *http.ServeMux
+}
+
+// NewServer creates a new API server with all routes registered.
+func NewServer(
+	authMgr *auth.Manager,
+	dockerClient *docker.Client,
+	composeMgr *docker.ComposeManager,
+	sambaMgr *system.SambaManager,
+	logCollector *system.LogCollector,
+	version string,
+	staticFS http.FileSystem,
+) *Server {
+	s := &Server{
+		Auth:    authMgr,
+		Docker:  dockerClient,
+		Compose: composeMgr,
+		Samba:   sambaMgr,
+		Logs:    logCollector,
+		Version: version,
+		Mux:     http.NewServeMux(),
+	}
+
+	s.registerRoutes(staticFS)
+	return s
+}
+
+func (s *Server) registerRoutes(staticFS http.FileSystem) {
+	// Auth endpoints (no auth middleware required)
+	s.Mux.HandleFunc("POST /api/auth/setup", s.handleAuthSetup)
+	s.Mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
+	s.Mux.HandleFunc("POST /api/auth/logout", s.handleAuthLogout)
+	s.Mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
+	s.Mux.HandleFunc("PUT /api/auth/password", s.requireAuth(s.handlePasswordChange))
+
+	// Dashboard / system status (frontend calls GET /api/system/status)
+	s.Mux.HandleFunc("GET /api/system/status", s.requireAuth(s.handleDashboard))
+	s.Mux.HandleFunc("GET /api/dashboard", s.requireAuth(s.handleDashboard))
+
+	// Compose file endpoints (frontend uses /api/compose/file)
+	s.Mux.HandleFunc("GET /api/compose/file", s.requireAuth(s.handleComposeGet))
+	s.Mux.HandleFunc("PUT /api/compose/file", s.requireAuth(s.handleComposeSave))
+	s.Mux.HandleFunc("POST /api/compose/validate", s.requireAuth(s.handleComposeValidate))
+
+	// Compose action endpoints
+	s.Mux.HandleFunc("POST /api/compose/deploy", s.requireAuth(s.handleComposeDeploy))
+	s.Mux.HandleFunc("POST /api/compose/start", s.requireAuth(s.handleComposeDeploy))
+	s.Mux.HandleFunc("POST /api/compose/stop", s.requireAuth(s.handleComposeStop))
+	s.Mux.HandleFunc("POST /api/compose/restart", s.requireAuth(s.handleComposeRestart))
+	s.Mux.HandleFunc("POST /api/compose/pull", s.requireAuth(s.handleComposePull))
+	s.Mux.HandleFunc("GET /api/compose/status", s.requireAuth(s.handleComposeStatus))
+
+	// WebSocket endpoints for compose terminal
+	s.Mux.HandleFunc("/api/compose/terminal", s.requireAuth(s.handleComposeTerminal))
+	s.Mux.HandleFunc("/api/compose/deploy/ws", s.requireAuth(s.handleComposeTerminal))
+
+	// Mount endpoints (frontend uses /api/mounts)
+	s.Mux.HandleFunc("GET /api/mounts", s.requireAuth(s.handleSambaList))
+	s.Mux.HandleFunc("POST /api/mounts", s.requireAuth(s.handleSambaAdd))
+	s.Mux.Handle("/api/mounts/", s.requireAuthHandler(http.HandlerFunc(s.handleMountsByID)))
+
+	// Network endpoints
+	s.Mux.HandleFunc("GET /api/network", s.requireAuth(s.handleNetworkGet))
+	s.Mux.HandleFunc("PUT /api/network", s.requireAuth(s.handleNetworkSet))
+
+	// System endpoints
+	s.Mux.HandleFunc("GET /api/system/info", s.requireAuth(s.handleSystemInfo))
+	s.Mux.HandleFunc("GET /api/system/logs", s.requireAuth(s.handleSystemLogs))
+	s.Mux.HandleFunc("GET /api/system/backup", s.requireAuth(s.handleSystemBackup))
+
+	// Static file serving (frontend)
+	if staticFS != nil {
+		fileServer := http.FileServer(staticFS)
+		s.Mux.Handle("/", s.spaHandler(fileServer))
+	}
+}
+
+// spaHandler wraps the file server to serve index.html for SPA routes.
+func (s *Server) spaHandler(fileServer http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Don't intercept API routes
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			http.NotFound(w, r)
+			return
+		}
+
+		// Try to serve the file directly
+		fileServer.ServeHTTP(w, r)
+	})
+}
+
+// requireAuth is middleware that checks for a valid session.
+func (s *Server) requireAuth(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := auth.GetSessionToken(r)
+		if token == "" {
+			writeError(w, http.StatusUnauthorized, "authentication required")
+			return
+		}
+
+		if _, valid := s.Auth.ValidateSession(token); !valid {
+			writeError(w, http.StatusUnauthorized, "session expired or invalid")
+			return
+		}
+
+		handler(w, r)
+	}
+}
+
+// requireAuthHandler wraps an http.Handler with auth middleware.
+func (s *Server) requireAuthHandler(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := auth.GetSessionToken(r)
+		if token == "" {
+			writeError(w, http.StatusUnauthorized, "authentication required")
+			return
+		}
+
+		if _, valid := s.Auth.ValidateSession(token); !valid {
+			writeError(w, http.StatusUnauthorized, "session expired or invalid")
+			return
+		}
+
+		handler.ServeHTTP(w, r)
+	})
+}
+
+// loggingMiddleware logs each request.
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("%s %s %s", r.RemoteAddr, r.Method, r.URL.Path)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// Handler returns the top-level HTTP handler with middleware applied.
+func (s *Server) Handler() http.Handler {
+	return loggingMiddleware(s.Mux)
+}
+
+// --- JSON response helpers ---
+
+type errorResponse struct {
+	Error string `json:"error"`
+}
+
+func writeJSON(w http.ResponseWriter, status int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		log.Printf("error encoding json response: %v", err)
+	}
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, errorResponse{Error: msg})
+}
+
+func writeOK(w http.ResponseWriter, data interface{}) {
+	writeJSON(w, http.StatusOK, data)
+}
+
+func decodeJSON(r *http.Request, dest interface{}) error {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(dest)
+}
+
+func decodeJSONLenient(r *http.Request, dest interface{}) error {
+	return json.NewDecoder(r.Body).Decode(dest)
+}

@@ -1,0 +1,38 @@
+# Go build output
+wraith-ui
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Go coverage
+*.out
+cover.html
+
+# Go module cache (if vendored)
+/vendor/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Build artifacts
+/build/
+/dist/
+*.iso
+
+# Environment / secrets
+.env
+*.pem
+*.key
+*.crt
+
+# OS files
+Thumbs.db
