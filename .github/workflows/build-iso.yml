@@ -21,11 +21,15 @@ jobs:
 
       - name: Build Go binary
         run: |
-          docker run --rm -v "${{ github.workspace }}:/build" -w /build \
-            golang:1.24-alpine sh -c \
-            "GOTOOLCHAIN=auto CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-            go build -ldflags='-s -w -X main.version=${{ steps.version.outputs.version }}' \
-            -o build/wraith-ui ./cmd/wraith-ui"
+          docker run --rm -v "${{ github.workspace }}:/build" \
+            -e GOTOOLCHAIN=auto \
+            -e CGO_ENABLED=0 \
+            -e GOOS=linux \
+            -e GOARCH=amd64 \
+            golang:1.24-alpine \
+            go build -C /build \
+              -ldflags="-s -w -X main.version=${{ steps.version.outputs.version }}" \
+              -o /build/build/wraith-ui ./cmd/wraith-ui
 
       - name: Build ISO builder image
         run: docker build -f build/Dockerfile.iso-builder -t wraithos-builder .
