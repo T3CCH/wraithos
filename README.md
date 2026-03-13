@@ -29,7 +29,7 @@ Think of WraithOS as a purpose-built appliance, not a general-purpose operating 
 - At least 1GB of RAM (512MB recommended minimum)
 - Two storage devices or partitions:
   - A boot device with the WraithOS ISO
-  - A configuration disk (~10GB) to store your settings and Docker configuration
+  - A configuration disk (~100MB) to store your settings and Docker configuration
   - (Optional) A separate cache disk for Docker images and container data
 
 ### Installation

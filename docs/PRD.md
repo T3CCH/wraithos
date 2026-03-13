@@ -158,7 +158,7 @@ WraithOS exists because running full Linux distributions as Docker hosts in VM e
 |                                                                   |
 |  +---------------------------+  +-----------------------------+   |
 |  |   Config Disk (ext4)      |  |   Docker Cache Disk (ext4)  |   |
-|  |   ~10GB                   |  |   Size varies               |   |
+|  |   ~100MB                  |  |   Size varies               |   |
 |  |                           |  |                              |   |
 |  |   - wraithos.conf         |  |   - /var/lib/docker/         |   |
 |  |   - credentials           |  |     (images, layers)         |   |
@@ -175,7 +175,7 @@ WraithOS exists because running full Linux distributions as Docker hosts in VM e
 +---------------------+     +------------------------+
 |   ISO / Boot Media  |     |   Virtual Disk 1       |
 |                     |     |   "Config Disk"        |
-|   UEFI bootable     |     |   ext4, ~10GB          |
+|   UEFI bootable     |     |   ext4, ~100MB         |
 |   Contains:         |     |                        |
 |   - GRUB/systemd-   |     |   /mnt/config/         |
 |     boot             |     |     credentials.bcrypt |
@@ -275,7 +275,7 @@ System Ready
 
 | ID | Requirement | Details |
 |----|-------------|---------|
-| STOR-1 | Config disk filesystem | ext4, approximately 10GB |
+| STOR-1 | Config disk filesystem | ext4, approximately 100MB |
 | STOR-2 | Config disk contents | Credentials (bcrypt), docker-compose.yml, network config, TLS certs, wraithos.conf |
 | STOR-3 | Docker cache disk filesystem | ext4, user-determined size |
 | STOR-4 | Docker cache disk contents | Docker image cache (overlay2), container volumes, Samba mount data |
