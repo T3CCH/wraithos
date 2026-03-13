@@ -3,7 +3,7 @@
 const $=(s,p)=>(p||document).querySelector(s);
 const $$=(s,p)=>[...(p||document).querySelectorAll(s)];
 const API='/api';
-let _poll=null,_term=null;
+let _poll=null,_term=null,_yamlTimer=null,_diskStatus=null;
 
 async function api(path,opts={}){
   const cfg={headers:{'Content-Type':'application/json',...opts.headers},...opts};
@@ -60,6 +60,7 @@ const ic={
 // ============ DASHBOARD ============
 function pgDash(){
   $('#main-content').innerHTML=`
+<div id="tmpfs-banner"></div>
 <div class="page-header"><h1 class="page-title">Dashboard</h1>
 <div class="page-actions">
 <button class="btn btn-sm btn-secondary" onclick="dashAct('restart')" id="btn-restart-stack">${ic.restart} Restart Stack</button>
@@ -72,6 +73,7 @@ function pgDash(){
 <h2 style="font-size:1.1rem;font-weight:600;margin-bottom:16px">Containers</h2>
 <div class="container-grid stagger" id="container-grid">${skel(3)}</div>`;
   startPoll(fetchDash,5000);
+  checkDiskStatus();
 }
 
 async function fetchDash(){
@@ -79,6 +81,26 @@ async function fetchDash(){
     const d=await api('/system/status');
     updStats(d.system||{});updNet(d.network||{});updCont(d.containers||[]);
     if(d.system&&d.system.uptime)$('#topbar-uptime').textContent=fU(d.system.uptime);
+  }catch{}
+}
+
+async function checkDiskStatus(){
+  try{
+    const s=await api('/setup/status');
+    _diskStatus=s;
+    const banner=$('#tmpfs-banner');
+    if(!banner)return;
+    const cfgTmpfs=s.configDisk&&!s.configDisk.persistent;
+    const cacheTmpfs=s.cacheDisk&&!s.cacheDisk.persistent;
+    if(cfgTmpfs||cacheTmpfs){
+      banner.innerHTML=`<div class="tmpfs-warning-banner animate-in">
+<span class="tmpfs-warning-icon">&#9888;</span>
+<span>Running on temporary storage &mdash; data will not survive reboot.</span>
+<a href="#" class="tmpfs-warning-link" onclick="event.preventDefault();setupWizard.show()">Set up disks</a>
+</div>`;
+    }else{
+      banner.innerHTML='';
+    }
   }catch{}
 }
 
@@ -138,6 +160,7 @@ window.contAct=async function(name,a){
 // ============ COMPOSE EDITOR ============
 function pgCompose(){
   $('#main-content').innerHTML=`<div class="editor-layout">
+<div id="compose-hint-banner"></div>
 <div class="editor-toolbar"><div class="editor-toolbar-group"><h1 class="page-title" style="font-size:1.1rem">Compose Editor</h1></div>
 <div class="editor-toolbar-group">
 <button class="btn btn-sm btn-secondary" onclick="compAct('validate')" id="btn-validate">${ic.check} Validate</button>
@@ -145,14 +168,63 @@ function pgCompose(){
 <button class="btn btn-sm btn-primary" onclick="compAct('deploy')" id="btn-deploy">${ic.send} Deploy</button>
 </div></div>
 <div class="editor-container"><textarea id="compose-editor" class="compose-textarea" spellcheck="false" placeholder="Loading docker-compose.yml..."></textarea></div>
+<div id="yaml-status" class="yaml-status hidden"></div>
 <div id="terminal-container"></div></div>`;
   _term=new WraithTerminal($('#terminal-container'));
   loadCompose();
+  loadComposeHint();
   const ta=$('#compose-editor');
   ta.addEventListener('keydown',e=>{
     if(e.key==='Tab'){e.preventDefault();const s=ta.selectionStart,en=ta.selectionEnd;ta.value=ta.value.substring(0,s)+'  '+ta.value.substring(en);ta.selectionStart=ta.selectionEnd=s+2}
     if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();compAct('save')}
   });
+  // Client-side YAML validation (debounced)
+  ta.addEventListener('input',function(){
+    if(_yamlTimer)clearTimeout(_yamlTimer);
+    _yamlTimer=setTimeout(()=>validateYAMLClient(ta.value),500);
+  });
+}
+
+async function loadComposeHint(){
+  try{
+    const s=_diskStatus||await api('/setup/status');
+    _diskStatus=s;
+    const banner=$('#compose-hint-banner');
+    if(!banner)return;
+    const cachePersist=s.cacheDisk&&s.cacheDisk.persistent;
+    if(cachePersist){
+      banner.innerHTML=`<div class="compose-hint-banner hint-info">
+<span>Cache disk at <code>/wraith/cache</code> for Docker volumes. Network mounts at <code>/mnt/</code>.</span>
+<button class="btn-icon compose-hint-dismiss" onclick="this.closest('.compose-hint-banner').remove()" title="Dismiss" aria-label="Dismiss hint">
+<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+</button></div>`;
+    }else if(s.cacheDisk&&!s.cacheDisk.persistent){
+      banner.innerHTML=`<div class="compose-hint-banner hint-warn">
+<span>Cache disk is on temporary storage. Volumes will not persist across reboots.</span>
+<button class="btn-icon compose-hint-dismiss" onclick="this.closest('.compose-hint-banner').remove()" title="Dismiss" aria-label="Dismiss hint">
+<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+</button></div>`;
+    }
+  }catch{}
+}
+
+function validateYAMLClient(content){
+  const el=$('#yaml-status');
+  if(!el)return;
+  if(!content||!content.trim()){el.classList.add('hidden');return}
+  if(typeof jsyaml==='undefined'){el.classList.add('hidden');return}
+  try{
+    jsyaml.load(content);
+    el.classList.remove('hidden');
+    el.className='yaml-status yaml-valid';
+    el.innerHTML=ic.check+' Valid YAML syntax';
+  }catch(e){
+    el.classList.remove('hidden');
+    el.className='yaml-status yaml-error';
+    const line=e.mark?e.mark.line+1:'?';
+    const msg=e.reason||e.message||'Unknown error';
+    el.textContent=`YAML Error: line ${line} \u2014 ${msg}`;
+  }
 }
 
 async function loadCompose(){
@@ -178,19 +250,27 @@ window.compAct=async function(a){
   if(btn)btn.disabled=false;
 };
 
-// ============ SAMBA MOUNTS ============
+// ============ NETWORK MOUNTS ============
 function pgMounts(){
-  $('#main-content').innerHTML=`<div class="page-header"><h1 class="page-title">Samba Mounts</h1>
+  $('#main-content').innerHTML=`<div class="page-header"><h1 class="page-title">Network Mounts</h1>
 <div class="page-actions"><button class="btn btn-sm btn-primary" onclick="showMntForm()">${ic.plus} Add Mount</button></div></div>
 <div id="mnt-form" class="hidden" style="margin-bottom:24px"><div class="form-card">
-<h3 style="font-size:.95rem;font-weight:600;margin-bottom:16px">New SMB/CIFS Mount</h3>
+<h3 style="font-size:.95rem;font-weight:600;margin-bottom:16px">New Network Mount</h3>
 <div class="form-grid">
+<div class="form-group" style="grid-column:1/-1"><label class="form-label">Mount Type</label>
+<div style="display:flex;gap:16px;margin-top:4px">
+<label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="radio" name="mnt-type" value="cifs" checked onchange="mntTypeChanged()"> SMB/CIFS</label>
+<label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="radio" name="mnt-type" value="nfs" onchange="mntTypeChanged()"> NFS</label>
+</div></div>
 <div class="form-group"><label class="form-label">Server</label><input class="form-input" id="mnt-server" placeholder="192.168.1.100"></div>
-<div class="form-group"><label class="form-label">Share</label><input class="form-input" id="mnt-share" placeholder="shared_folder"></div>
-<div class="form-group"><label class="form-label">Mount Point</label><input class="form-input" id="mnt-mp" placeholder="/mnt/smb/myshare"></div>
+<div class="form-group"><label class="form-label" id="mnt-share-label">Share</label><input class="form-input" id="mnt-share" placeholder="shared_folder"></div>
+<div class="form-group"><label class="form-label">Mount Name</label><input class="form-input" id="mnt-name" placeholder="media" oninput="mntNameChanged()">
+<div class="form-hint" id="mnt-path-hint">Mounts at /mnt/&lt;name&gt;</div></div>
+<div id="mnt-creds-group">
 <div class="form-group"><label class="form-label">Username</label><input class="form-input" id="mnt-user" placeholder="optional"></div>
 <div class="form-group"><label class="form-label">Password</label><input class="form-input" id="mnt-pass" type="password" placeholder="optional"></div>
-<div class="form-group"><label class="form-label">Options</label><input class="form-input" id="mnt-opts" placeholder="ro,vers=3.0"><div class="form-hint">Additional mount options</div></div>
+</div>
+<div class="form-group"><label class="form-label">Options</label><input class="form-input" id="mnt-opts" placeholder="ro,vers=3.0"><div class="form-hint" id="mnt-opts-hint">Additional mount options</div></div>
 </div><div class="form-actions"><button class="btn btn-primary" onclick="addMnt()">Mount</button>
 <button class="btn btn-secondary" onclick="hideMntForm()">Cancel</button></div></div></div>
 <div class="mount-list" id="mount-list">${skel(2)}</div>`;
@@ -200,25 +280,52 @@ function pgMounts(){
 async function fetchMnts(){
   try{
     const d=await api('/mounts'),ms=d.mounts||d||[],l=$('#mount-list');if(!l)return;
-    if(!ms.length){l.innerHTML='<div class="empty-state"><h3>No mounts configured</h3><p>Add a Samba/CIFS mount to share files with containers.</p></div>';return}
-    l.innerHTML=ms.map((m,i)=>`<div class="mount-card" style="animation-delay:${i*60}ms"><div class="mount-info">
+    if(!ms.length){l.innerHTML='<div class="empty-state"><h3>No mounts configured</h3><p>Add a network mount (SMB/CIFS or NFS) to share files with containers.</p></div>';return}
+    l.innerHTML=ms.map((m,i)=>{const t=(m.type||'cifs').toUpperCase();const src=m.type==='nfs'?`${esc(m.server)}:${esc(m.share)}`:`//${esc(m.server)}/${esc(m.share)}`;
+    return`<div class="mount-card" style="animation-delay:${i*60}ms"><div class="mount-info">
 <h3><span class="container-status ${m.mounted?'status-running':'status-stopped'}"><span class="dot"></span>${m.mounted?'mounted':'unmounted'}</span> ${esc(m.mountpoint||m.path)}</h3>
-<dl class="mount-details"><dt>Source</dt><dd>//${esc(m.server)}/${esc(m.share)}</dd><dt>User</dt><dd>${esc(m.username||'guest')}</dd><dt>Options</dt><dd>${esc(m.options||'defaults')}</dd></dl>
+<dl class="mount-details"><dt>Type</dt><dd>${t}</dd><dt>Source</dt><dd>${src}</dd>${m.type!=='nfs'?`<dt>User</dt><dd>${esc(m.username||'guest')}</dd>`:''}<dt>Options</dt><dd>${esc(m.options||'defaults')}</dd></dl>
 ${(m.volumes&&m.volumes.length)?`<div class="mount-volumes"><div class="label">Used by volumes</div>${m.volumes.map(v=>`<span class="volume-tag">${esc(v)}</span>`).join('')}</div>`:''}</div>
 <div class="mount-actions">${m.mounted?`<button class="btn btn-sm btn-secondary" data-mnt-action="unmount" data-mnt-id="${esc(m.id||m.mountpoint)}">Unmount</button>`
 :`<button class="btn btn-sm btn-primary" data-mnt-action="mount" data-mnt-id="${esc(m.id||m.mountpoint)}">Mount</button>`}
-<button class="btn btn-sm btn-danger" data-mnt-action="delete" data-mnt-id="${esc(m.id||m.mountpoint)}">Remove</button></div></div>`).join('');
+<button class="btn btn-sm btn-danger" data-mnt-action="delete" data-mnt-id="${esc(m.id||m.mountpoint)}">Remove</button></div></div>`}).join('');
     // Event delegation for mount action buttons
     l.addEventListener('click',function(e){const btn=e.target.closest('[data-mnt-action]');if(btn)mntAct(btn.dataset.mntId,btn.dataset.mntAction)});
   }catch(e){const l=$('#mount-list');if(l)l.innerHTML=`<div class="empty-state"><h3>Could not load mounts</h3><p>${esc(e.message)}</p></div>`}
 }
 
-window.showMntForm=function(){$('#mnt-form').classList.remove('hidden')};
+window.showMntForm=function(){$('#mnt-form').classList.remove('hidden');mntTypeChanged()};
 window.hideMntForm=function(){$('#mnt-form').classList.add('hidden')};
+window.mntTypeChanged=function(){
+  const t=document.querySelector('input[name="mnt-type"]:checked').value;
+  const creds=$('#mnt-creds-group');
+  const shareLabel=$('#mnt-share-label');
+  const shareInput=$('#mnt-share');
+  const optsHint=$('#mnt-opts-hint');
+  if(t==='nfs'){
+    if(creds)creds.style.display='none';
+    if(shareLabel)shareLabel.textContent='Export Path';
+    if(shareInput)shareInput.placeholder='/data/exports';
+    if(optsHint)optsHint.textContent='Default: noatime,nfsvers=4';
+  }else{
+    if(creds)creds.style.display='';
+    if(shareLabel)shareLabel.textContent='Share';
+    if(shareInput)shareInput.placeholder='shared_folder';
+    if(optsHint)optsHint.textContent='Additional mount options';
+  }
+};
+window.mntNameChanged=function(){
+  const v=$('#mnt-name').value;
+  const hint=$('#mnt-path-hint');
+  if(hint)hint.textContent=v?`Mounts at /mnt/${v}`:'Mounts at /mnt/<name>';
+};
 window.addMnt=async function(){
-  const d={server:$('#mnt-server').value,share:$('#mnt-share').value,mountpoint:$('#mnt-mp').value,
-    username:$('#mnt-user').value,password:$('#mnt-pass').value,options:$('#mnt-opts').value};
-  if(!d.server||!d.share||!d.mountpoint){toast('Server, share, and mount point required','error');return}
+  const t=document.querySelector('input[name="mnt-type"]:checked').value;
+  const d={type:t,server:$('#mnt-server').value,share:$('#mnt-share').value,mountpoint:$('#mnt-name').value,
+    options:$('#mnt-opts').value};
+  if(t==='cifs'){d.username=$('#mnt-user').value;d.password=$('#mnt-pass').value}
+  if(!d.server||!d.share||!d.mountpoint){toast('Server, share, and mount name are required','error');return}
+  if(!/^[a-zA-Z0-9_-]+$/.test(d.mountpoint)){toast('Mount name must be alphanumeric, hyphens, or underscores only','error');return}
   try{await api('/mounts',{method:'POST',body:d});toast('Mount added','success');hideMntForm();fetchMnts()}
   catch(e){toast(`Error: ${e.message}`,'error')}
 };
@@ -278,13 +385,17 @@ function pgSettings(){
 <div class="form-group"><label class="form-label">New Password</label><input class="form-input" id="pw-new" type="password"></div>
 <div class="form-group"><label class="form-label">Confirm New Password</label><input class="form-input" id="pw-cfm" type="password"></div>
 </div><div class="form-actions"><button class="btn btn-primary" onclick="chgPw()">Update Password</button></div></div>
+<div class="settings-section card animate-up" id="settings-disk-section"><div class="section-title">Disk Management</div>
+<div id="settings-disk-status">Loading disk status...</div>
+<div class="form-actions"><button class="btn btn-primary" onclick="setupWizard.show()">Set Up Disks</button>
+<button class="btn btn-secondary" onclick="settingsRescanDisks()">Rescan Disks</button></div></div>
 <div class="settings-section card animate-up"><div class="section-title">Backup &amp; Export</div>
 <p style="font-size:.85rem;color:var(--tx-d);margin-bottom:16px">Download config backup (compose files, mount configs, network settings). Docker images not included.</p>
 <button class="btn btn-secondary" onclick="exportCfg()">${ic.dl} Export Config Backup</button></div>
 <div class="settings-section card animate-up"><div class="card-header"><div class="section-title" style="border:none;margin:0;padding:0">System Logs</div>
 <button class="btn btn-sm btn-secondary" onclick="fetchLogs()">Refresh</button></div>
 <div class="log-viewer" id="log-viewer">Loading logs...</div></div></div>`;
-  fetchSysInfo();fetchLogs();
+  fetchSysInfo();fetchLogs();fetchSettingsDiskStatus();
 }
 
 async function fetchSysInfo(){
@@ -297,6 +408,31 @@ async function fetchLogs(){
   try{const d=await api('/system/logs');const v=$('#log-viewer');if(v)v.textContent=d.logs||d||'No logs'}
   catch(e){const v=$('#log-viewer');if(v)v.textContent=`Error: ${e.message}`}
 }
+
+async function fetchSettingsDiskStatus(){
+  try{
+    const s=await api('/setup/status');
+    _diskStatus=s;
+    const el=$('#settings-disk-status');if(!el)return;
+    const cfg=s.configDisk||{};
+    const cache=s.cacheDisk||{};
+    el.innerHTML=`<dl class="info-grid" style="margin-bottom:16px">
+<dt>Config Disk</dt><dd>${cfg.persistent?`Persistent (${esc(cfg.type)} on ${esc(cfg.device)})`:'Temporary (tmpfs)'}</dd>
+<dt>Cache Disk</dt><dd>${cache.persistent?`Persistent (${esc(cache.type)} on ${esc(cache.device)})`:'Temporary (tmpfs)'}</dd>
+<dt>Available Disks</dt><dd>${(s.availableDisks||[]).length} detected</dd>
+</dl>`;
+  }catch(e){
+    const el=$('#settings-disk-status');if(el)el.textContent='Could not load disk status';
+  }
+}
+
+window.settingsRescanDisks=async function(){
+  try{
+    await api('/setup/rescan',{method:'POST'});
+    toast('Disk rescan complete','success');
+    fetchSettingsDiskStatus();
+  }catch(e){toast(`Rescan failed: ${e.message}`,'error')}
+};
 
 window.chgPw=async function(){
   const c=$('#pw-cur').value,n=$('#pw-new').value,cf=$('#pw-cfm').value;
@@ -314,8 +450,24 @@ window.exportCfg=async function(){
   catch(e){toast(`Export failed: ${e.message}`,'error')}
 };
 
+// === EXPOSE SHARED UTILS FOR EXTERNAL SCRIPTS (setup-wizard.js, etc.) ===
+window._w={api,toast,$,$$,esc,fB,fU};
+
 // === INIT ===
+// Load dependencies then navigate to dashboard
+let _scriptsLoaded=0;
+const _scriptsNeeded=3;
+function _onScriptReady(){_scriptsLoaded++;if(_scriptsLoaded>=_scriptsNeeded){navigate('dashboard');setTimeout(()=>{if(typeof setupWizard!=='undefined')setupWizard.checkAndShow()},500)}}
+
 const ts=document.createElement('script');ts.src='/js/terminal.js';
-ts.onload=()=>navigate('dashboard');ts.onerror=()=>navigate('dashboard');
+ts.onload=_onScriptReady;ts.onerror=_onScriptReady;
 document.head.appendChild(ts);
+
+const sw=document.createElement('script');sw.src='/js/setup-wizard.js';
+sw.onload=_onScriptReady;sw.onerror=_onScriptReady;
+document.head.appendChild(sw);
+
+const yj=document.createElement('script');yj.src='/js/vendor/js-yaml.min.js';
+yj.onload=_onScriptReady;yj.onerror=_onScriptReady;
+document.head.appendChild(yj);
 })();

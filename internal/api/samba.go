@@ -7,7 +7,7 @@ import (
 	"github.com/wraithos/wraith-ui/internal/system"
 )
 
-// handleSambaList returns all configured Samba mounts.
+// handleSambaList returns all configured network mounts.
 func (s *Server) handleSambaList(w http.ResponseWriter, r *http.Request) {
 	mounts, err := s.Samba.ListMounts()
 	if err != nil {
@@ -20,7 +20,7 @@ func (s *Server) handleSambaList(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, map[string]interface{}{"mounts": mounts})
 }
 
-// handleSambaAdd creates a new Samba mount configuration.
+// handleSambaAdd creates a new network mount configuration.
 func (s *Server) handleSambaAdd(w http.ResponseWriter, r *http.Request) {
 	var mount system.SambaMount
 	if err := decodeJSONLenient(r, &mount); err != nil {

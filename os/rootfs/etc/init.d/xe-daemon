@@ -1,0 +1,28 @@
+#!/sbin/openrc-run
+# xe-daemon - Xen guest agent for XCP-ng/XenServer
+#
+# Reports VM network configuration, OS info, and memory stats
+# to XenStore so the hypervisor host can read them.
+
+description="Xen guest agent (xe-daemon)"
+
+command="/usr/sbin/xe-daemon"
+command_args=""
+command_background=true
+pidfile="/var/run/xe-daemon.pid"
+
+depend() {
+    after xenfs
+    need net
+}
+
+start_pre() {
+    # Ensure XenStore is accessible
+    if [ ! -e /proc/xen ] && [ ! -e /dev/xen/xenbus ]; then
+        ewarn "Xen environment not detected -- skipping xe-daemon"
+        return 1
+    fi
+
+    # Create cache directory
+    mkdir -p /var/cache/xe-linux-distribution
+}

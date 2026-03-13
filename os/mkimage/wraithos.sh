@@ -3,7 +3,7 @@
 # This profile builds a UEFI-bootable ISO containing:
 #   - Alpine Linux with virt kernel (VM-optimized)
 #   - Docker + docker-compose
-#   - Networking (nftables, cifs-utils)
+#   - Networking (nftables, cifs-utils, nfs-utils)
 #   - squashfs root filesystem for RAM-based boot
 #   - GRUB EFI bootloader
 #
@@ -44,6 +44,7 @@ profile_wraithos() {
 
         nftables
         cifs-utils
+        nfs-utils
         e2fsprogs
         squashfs-tools
         zram-init
@@ -147,8 +148,14 @@ EOF
     cp "$_rootfs/usr/share/zoneinfo/UTC" "$_rootfs/etc/localtime"
     echo "UTC" > "$_rootfs/etc/timezone"
 
-    # Disable root password login (web UI handles auth)
-    sed -i 's|^root:.*|root:!::0:::::|' "$_rootfs/etc/shadow" 2>/dev/null || true
+    # Set root password for console access (debug/emergency)
+    # Password: wraithos
+    local _hash
+    _hash=$(openssl passwd -6 "wraithos")
+    # Use awk instead of sed to avoid $ interpolation issues in hash
+    awk -v hash="$_hash" 'BEGIN{FS=OFS=":"} /^root:/ {$2=hash} 1' "$_rootfs/etc/shadow" > "$_rootfs/etc/shadow.tmp"
+    mv "$_rootfs/etc/shadow.tmp" "$_rootfs/etc/shadow"
+    chmod 640 "$_rootfs/etc/shadow"
 
     msg "WraithOS overlay installed"
 }
@@ -167,12 +174,12 @@ set timeout=3
 set default=0
 
 menuentry "WraithOS" {
-    linux /boot/$_kernel modules=loop,squashfs,overlay,zram quiet
+    linux /boot/$_kernel modules=loop,squashfs,overlay,lz4,lz4_compress,lz4hc,zram quiet
     initrd /boot/$_initrd
 }
 
 menuentry "WraithOS (verbose boot)" {
-    linux /boot/$_kernel modules=loop,squashfs,overlay,zram loglevel=7
+    linux /boot/$_kernel modules=loop,squashfs,overlay,lz4,lz4_compress,lz4hc,zram loglevel=7
     initrd /boot/$_initrd
 }
 EOF

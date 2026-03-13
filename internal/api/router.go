@@ -85,6 +85,18 @@ func (s *Server) registerRoutes(staticFS http.FileSystem) {
 	s.Mux.HandleFunc("GET /api/network", s.requireAuth(s.handleNetworkGet))
 	s.Mux.HandleFunc("PUT /api/network", s.requireAuth(s.handleNetworkSet))
 
+	// Setup wizard endpoints
+	s.Mux.HandleFunc("GET /api/setup/status", s.requireAuth(s.handleSetupStatus))
+	s.Mux.HandleFunc("POST /api/setup/disks", s.requireAuth(s.handleSetupDisks))
+	s.Mux.HandleFunc("POST /api/setup/rescan", s.requireAuth(s.handleSetupRescan))
+
+	// Timezone endpoints
+	s.Mux.HandleFunc("GET /api/system/timezone", s.requireAuth(s.handleTimezoneGet))
+	s.Mux.HandleFunc("PUT /api/system/timezone", s.requireAuth(s.handleTimezoneSet))
+
+	// Reboot endpoint
+	s.Mux.HandleFunc("POST /api/system/reboot", s.requireAuth(s.handleReboot))
+
 	// System endpoints
 	s.Mux.HandleFunc("GET /api/system/info", s.requireAuth(s.handleSystemInfo))
 	s.Mux.HandleFunc("GET /api/system/logs", s.requireAuth(s.handleSystemLogs))

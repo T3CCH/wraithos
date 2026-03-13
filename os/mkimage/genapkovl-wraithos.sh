@@ -27,11 +27,12 @@ fi
 
 # Ensure correct permissions on service scripts
 chmod 755 "$OVERLAY_DIR"/etc/init.d/wraith-* 2>/dev/null || true
+chmod 755 "$OVERLAY_DIR"/etc/init.d/xe-daemon 2>/dev/null || true
 chmod 755 "$OVERLAY_DIR"/etc/local.d/*.start 2>/dev/null || true
 
 # Enable services in the default runlevel
 mkdir -p "$OVERLAY_DIR/etc/runlevels/default"
-for svc in wraith-disks wraith-network wraith-docker wraith-samba wraith-ui local; do
+for svc in wraith-disks wraith-network wraith-docker wraith-samba wraith-ui xe-daemon local; do
     ln -sf "/etc/init.d/$svc" "$OVERLAY_DIR/etc/runlevels/default/$svc" 2>/dev/null || true
 done
 

@@ -1,11 +1,11 @@
 #!/sbin/openrc-run
-# wraith-samba - Restore Samba/CIFS mounts from config disk
+# wraith-samba - Restore network mounts (CIFS + NFS) from config disk
 #
 # Reads mount definitions from /wraith/config/samba.json and mounts
-# each share. Mounts go to /wraith/cache/mounts/<name> so they can
-# be bind-mounted into Docker containers.
+# each share. Mounts go to /mnt/<name> so they can be
+# bind-mounted into Docker containers.
 
-description="Restore WraithOS Samba mounts"
+description="Restore WraithOS network mounts"
 
 # Load configuration
 . /etc/conf.d/wraith
@@ -36,7 +36,7 @@ parse_and_mount() {
     echo "$mounts_json" | while IFS= read -r entry; do
         [ -z "$entry" ] && continue
 
-        local name server share username password mount_opts
+        local name server share username password mount_opts mount_type
 
         name=$(echo "$entry"     | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
         server=$(echo "$entry"   | sed -n 's/.*"server"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
@@ -44,13 +44,21 @@ parse_and_mount() {
         username=$(echo "$entry" | sed -n 's/.*"username"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
         password=$(echo "$entry" | sed -n 's/.*"password"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
         mount_opts=$(echo "$entry" | sed -n 's/.*"options"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+        mount_type=$(echo "$entry" | sed -n 's/.*"type"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+
+        # Default to cifs if type not specified (backward compat)
+        [ -z "$mount_type" ] && mount_type="cifs"
 
         if [ -z "$name" ] || [ -z "$server" ] || [ -z "$share" ]; then
-            ewarn "Skipping incomplete Samba mount entry"
+            ewarn "Skipping incomplete mount entry"
             continue
         fi
 
-        mount_share "$name" "$server" "$share" "$username" "$password" "$mount_opts"
+        if [ "$mount_type" = "nfs" ]; then
+            mount_nfs "$name" "$server" "$share" "$mount_opts"
+        else
+            mount_share "$name" "$server" "$share" "$username" "$password" "$mount_opts"
+        fi
     done
 }
 
@@ -98,20 +106,52 @@ mount_share() {
     fi
 }
 
+# Mount a single NFS share.
+# Args: name server export [extra_options]
+mount_nfs() {
+    local name="$1"
+    local server="$2"
+    local export_path="$3"
+    local extra_opts="$4"
+
+    local mount_point="$WRAITH_SAMBA_MOUNT_DIR/$name"
+    local source="${server}:${export_path}"
+
+    # Skip if already mounted
+    if mountpoint -q "$mount_point" 2>/dev/null; then
+        einfo "NFS mount '$name' already mounted"
+        return 0
+    fi
+
+    mkdir -p "$mount_point"
+
+    local opts="noatime,nfsvers=4"
+    if [ -n "$extra_opts" ]; then
+        opts="${opts},${extra_opts}"
+    fi
+
+    einfo "Mounting NFS share: $source -> $mount_point"
+    if mount -t nfs -o "$opts" "$source" "$mount_point"; then
+        einfo "  Mounted successfully"
+    else
+        ewarn "  Failed to mount $source -- share may be unavailable"
+    fi
+}
+
 start() {
-    ebegin "Restoring Samba mounts"
+    ebegin "Restoring network mounts"
 
     local config_file="$WRAITH_CONFIG_DIR/samba.json"
 
     if [ ! -f "$config_file" ]; then
-        einfo "No Samba configuration found"
+        einfo "No network mount configuration found"
         eend 0
         return 0
     fi
 
     # Check for empty mounts array
     if grep -q '"mounts":\[\]' "$config_file" 2>/dev/null; then
-        einfo "No Samba mounts configured"
+        einfo "No network mounts configured"
         eend 0
         return 0
     fi
@@ -123,9 +163,9 @@ start() {
 }
 
 stop() {
-    ebegin "Unmounting Samba shares"
+    ebegin "Unmounting network shares"
 
-    # Unmount everything under the Samba mount directory
+    # Unmount everything under the network mount directory
     if [ -d "$WRAITH_SAMBA_MOUNT_DIR" ]; then
         for mnt in "$WRAITH_SAMBA_MOUNT_DIR"/*/; do
             [ -d "$mnt" ] || continue

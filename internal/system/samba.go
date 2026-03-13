@@ -13,10 +13,12 @@ import (
 )
 
 var validServerName = regexp.MustCompile(`^[\w.\-]+$`)
+var validMountName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
-// SambaMount represents a configured SMB/CIFS mount.
+// SambaMount represents a configured network mount (CIFS or NFS).
 type SambaMount struct {
 	ID         string `json:"id"`
+	Type       string `json:"type,omitempty"` // "cifs" (default) or "nfs"
 	Server     string `json:"server"`
 	Share      string `json:"share"`
 	MountPoint string `json:"mountpoint"`
@@ -26,17 +28,25 @@ type SambaMount struct {
 	Mounted    bool   `json:"mounted"`
 }
 
+// MountType returns the mount type, defaulting to "cifs" for backward compatibility.
+func (m *SambaMount) MountType() string {
+	if m.Type == "nfs" {
+		return "nfs"
+	}
+	return "cifs"
+}
+
 // SambaConfig holds all configured mounts.
 type SambaConfig struct {
 	Mounts []SambaMount `json:"mounts"`
 }
 
-// SambaManager manages CIFS mounts.
+// SambaManager manages network mounts (CIFS and NFS).
 type SambaManager struct {
 	mu sync.Mutex
 }
 
-// NewSambaManager creates a new Samba mount manager.
+// NewSambaManager creates a new network mount manager.
 func NewSambaManager() *SambaManager {
 	return &SambaManager{}
 }
@@ -62,7 +72,9 @@ func (m *SambaManager) ListMounts() ([]SambaMount, error) {
 	return cfg.Mounts, nil
 }
 
-// AddMount adds a new Samba mount configuration.
+// AddMount adds a new network mount configuration.
+// The MountPoint field is treated as a mount name (e.g. "media") and the
+// actual mount path is constructed as /mnt/<name>.
 func (m *SambaManager) AddMount(mount SambaMount) (*SambaMount, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -71,17 +83,39 @@ func (m *SambaManager) AddMount(mount SambaMount) (*SambaMount, error) {
 		return nil, fmt.Errorf("server and share are required")
 	}
 
+	// Validate mount type
+	mountType := mount.MountType()
+	mount.Type = mountType
+
+	// Validate mount name (sent via MountPoint field from frontend)
+	mountName := mount.MountPoint
+	if mountName == "" {
+		return nil, fmt.Errorf("mount name is required")
+	}
+	if !validMountName.MatchString(mountName) {
+		return nil, fmt.Errorf("invalid mount name: must contain only alphanumeric characters, hyphens, or underscores")
+	}
+
+	// Construct the actual mount point from the name
+	mount.MountPoint = filepath.Join(storage.MountsDir(), mountName)
+
 	// Validate server name to prevent injection
 	if !validServerName.MatchString(mount.Server) {
 		return nil, fmt.Errorf("invalid server name: must contain only alphanumeric, dot, hyphen, or underscore characters")
 	}
 
-	// Validate username and password don't contain characters that could inject mount options
-	if err := validateCredential(mount.Username, "username"); err != nil {
-		return nil, err
-	}
-	if err := validateCredential(mount.Password, "password"); err != nil {
-		return nil, err
+	// Validate credentials (only relevant for CIFS)
+	if mountType == "cifs" {
+		if err := validateCredential(mount.Username, "username"); err != nil {
+			return nil, err
+		}
+		if err := validateCredential(mount.Password, "password"); err != nil {
+			return nil, err
+		}
+	} else {
+		// NFS does not use credentials
+		mount.Username = ""
+		mount.Password = ""
 	}
 
 	cfg, err := m.loadConfig()
@@ -99,18 +133,12 @@ func (m *SambaManager) AddMount(mount SambaMount) (*SambaMount, error) {
 		}
 	}
 
-	// Set default mount point
-	if mount.MountPoint == "" {
-		mount.MountPoint = storage.MountsDir() + "/" + mount.ID
+	// Check for duplicate mount point
+	for _, existing := range cfg.Mounts {
+		if existing.MountPoint == mount.MountPoint {
+			return nil, fmt.Errorf("mount name %q is already in use", mountName)
+		}
 	}
-
-	// Validate mount point is within allowed directory to prevent path traversal
-	cleanPath := filepath.Clean(mount.MountPoint)
-	mountsDir := storage.MountsDir()
-	if !strings.HasPrefix(cleanPath, mountsDir+"/") && cleanPath != mountsDir {
-		return nil, fmt.Errorf("mount point must be within %s", mountsDir)
-	}
-	mount.MountPoint = cleanPath
 
 	cfg.Mounts = append(cfg.Mounts, mount)
 	if err := storage.WriteJSON(storage.SambaFile(), cfg); err != nil {
@@ -175,7 +203,16 @@ func (m *SambaManager) Mount(id string) error {
 		return fmt.Errorf("create mount point: %w", err)
 	}
 
-	// Build mount.cifs command using credentials file for security
+	switch mount.MountType() {
+	case "nfs":
+		return m.mountNFS(mount)
+	default:
+		return m.mountCIFS(mount)
+	}
+}
+
+// mountCIFS mounts a CIFS/SMB share.
+func (m *SambaManager) mountCIFS(mount *SambaMount) error {
 	source := fmt.Sprintf("//%s/%s", mount.Server, mount.Share)
 	opts := "iocharset=utf8"
 
@@ -208,10 +245,32 @@ func (m *SambaManager) Mount(id string) error {
 		opts += ",guest"
 	}
 
+	if mount.Options != "" {
+		opts += "," + mount.Options
+	}
+
 	cmd := exec.Command("mount.cifs", source, mount.MountPoint, "-o", opts)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("mount.cifs failed: %s: %w", strings.TrimSpace(string(output)), err)
+	}
+
+	return nil
+}
+
+// mountNFS mounts an NFS export.
+func (m *SambaManager) mountNFS(mount *SambaMount) error {
+	source := fmt.Sprintf("%s:%s", mount.Server, mount.Share)
+	opts := "noatime,nfsvers=4"
+
+	if mount.Options != "" {
+		opts += "," + mount.Options
+	}
+
+	cmd := exec.Command("mount", "-t", "nfs", source, mount.MountPoint, "-o", opts)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("mount -t nfs failed: %s: %w", strings.TrimSpace(string(output)), err)
 	}
 
 	return nil
@@ -272,7 +331,7 @@ func getActiveMounts() map[string]bool {
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) >= 3 && fields[2] == "cifs" {
+		if len(fields) >= 3 && (fields[2] == "cifs" || fields[2] == "nfs" || fields[2] == "nfs4") {
 			result[fields[1]] = true
 		}
 	}

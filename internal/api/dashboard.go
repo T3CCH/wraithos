@@ -6,20 +6,23 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/wraithos/wraith-ui/internal/setup"
 	"github.com/wraithos/wraith-ui/internal/storage"
 	"github.com/wraithos/wraith-ui/internal/system"
 )
 
 // systemStats matches what the frontend JS expects in d.system.
 type systemStats struct {
-	CPUPercent     float64 `json:"cpuPercent"`
-	RAMUsed        uint64  `json:"ramUsed"`
-	RAMTotal       uint64  `json:"ramTotal"`
-	ConfigDiskUsed uint64  `json:"configDiskUsed"`
-	ConfigDiskTotal uint64 `json:"configDiskTotal"`
-	CacheDiskUsed  uint64  `json:"cacheDiskUsed"`
-	CacheDiskTotal uint64  `json:"cacheDiskTotal"`
-	Uptime         float64 `json:"uptime"`
+	CPUPercent      float64 `json:"cpuPercent"`
+	RAMUsed         uint64  `json:"ramUsed"`
+	RAMTotal        uint64  `json:"ramTotal"`
+	ConfigDiskUsed  uint64  `json:"configDiskUsed"`
+	ConfigDiskTotal uint64  `json:"configDiskTotal"`
+	CacheDiskUsed   uint64  `json:"cacheDiskUsed"`
+	CacheDiskTotal  uint64  `json:"cacheDiskTotal"`
+	ConfigDiskType  string  `json:"configDiskType"`
+	CacheDiskType   string  `json:"cacheDiskType"`
+	Uptime          float64 `json:"uptime"`
 }
 
 // networkInfo matches what the frontend JS expects in d.network.
@@ -84,6 +87,17 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	} else {
 		resp.System.CacheDiskUsed = cacheDisk.UsedMB * 1024 * 1024
 		resp.System.CacheDiskTotal = cacheDisk.TotalMB * 1024 * 1024
+	}
+
+	// Disk persistence type (tmpfs vs ext4)
+	configStatus, cacheStatus := setup.GetDiskStatus()
+	resp.System.ConfigDiskType = configStatus.Type
+	resp.System.CacheDiskType = cacheStatus.Type
+	if resp.System.ConfigDiskType == "" {
+		resp.System.ConfigDiskType = "unknown"
+	}
+	if resp.System.CacheDiskType == "" {
+		resp.System.CacheDiskType = "unknown"
 	}
 
 	// Uptime in seconds

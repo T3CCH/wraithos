@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/wraithos/wraith-ui/internal/auth"
+	"github.com/wraithos/wraith-ui/internal/setup"
 )
 
 type setupRequest struct {
@@ -18,9 +19,10 @@ type loginRequest struct {
 }
 
 type authStatusResponse struct {
-	NeedsSetup bool   `json:"needsSetup"`
-	LoggedIn   bool   `json:"loggedIn"`
-	Version    string `json:"version,omitempty"`
+	NeedsSetup     bool   `json:"needsSetup"`
+	LoggedIn       bool   `json:"loggedIn"`
+	Version        string `json:"version,omitempty"`
+	NeedsDiskSetup bool   `json:"needsDiskSetup"`
 }
 
 // handleAuthSetup creates the initial admin credentials (first boot only).
@@ -110,8 +112,9 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeOK(w, authStatusResponse{
-		NeedsSetup: needsSetup,
-		LoggedIn:   loggedIn,
-		Version:    s.Version,
+		NeedsSetup:     needsSetup,
+		LoggedIn:       loggedIn,
+		Version:        s.Version,
+		NeedsDiskSetup: setup.NeedsDiskSetup(),
 	})
 }
