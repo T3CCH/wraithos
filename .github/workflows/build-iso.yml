@@ -25,29 +25,22 @@ jobs:
             golang:1.24-alpine sh -c \
             "GOTOOLCHAIN=auto CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
             go build -ldflags='-s -w -X main.version=${{ steps.version.outputs.version }}' \
-            -o wraith-ui ./cmd/wraith-ui"
+            -o build/wraith-ui ./cmd/wraith-ui"
 
-      - name: Build ISO in Alpine container
+      - name: Build ISO builder image
+        run: docker build -f build/Dockerfile.iso-builder -t wraithos-builder .
+
+      - name: Build ISO
         run: |
           docker run --rm --privileged \
-            -v "${{ github.workspace }}:/wraithos" \
-            alpine:3.21 /bin/sh -c '
-              set -eu
-
-              apk add --no-cache \
-                alpine-sdk squashfs-tools grub-efi mtools \
-                dosfstools xorriso git fakeroot sudo
-
-              cd /wraithos/os/scripts
-              chmod +x build-iso.sh
-              bash build-iso.sh
-            '
+            -v "${{ github.workspace }}/build:/out" \
+            wraithos-builder
 
       - name: Upload ISO artifact
         uses: actions/upload-artifact@v4
         with:
           name: wraithos-${{ steps.version.outputs.version }}.iso
-          path: os/build/wraithos-${{ steps.version.outputs.version }}.iso
+          path: build/wraithos-${{ steps.version.outputs.version }}.iso
           if-no-files-found: error
 
       - name: Create GitHub Release
@@ -56,4 +49,4 @@ jobs:
         with:
           name: WraithOS ${{ steps.version.outputs.version }}
           generate_release_notes: true
-          files: os/build/wraithos-${{ steps.version.outputs.version }}.iso
+          files: build/wraithos-${{ steps.version.outputs.version }}.iso
