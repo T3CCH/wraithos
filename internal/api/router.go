@@ -89,6 +89,7 @@ func (s *Server) registerRoutes(staticFS http.FileSystem) {
 	s.Mux.HandleFunc("GET /api/setup/status", s.requireAuth(s.handleSetupStatus))
 	s.Mux.HandleFunc("POST /api/setup/disks", s.requireAuth(s.handleSetupDisks))
 	s.Mux.HandleFunc("POST /api/setup/rescan", s.requireAuth(s.handleSetupRescan))
+	s.Mux.HandleFunc("POST /api/setup/wipe", s.requireAuth(s.handleDiskWipe))
 
 	// Timezone endpoints
 	s.Mux.HandleFunc("GET /api/system/timezone", s.requireAuth(s.handleTimezoneGet))
@@ -101,6 +102,7 @@ func (s *Server) registerRoutes(staticFS http.FileSystem) {
 	s.Mux.HandleFunc("GET /api/system/info", s.requireAuth(s.handleSystemInfo))
 	s.Mux.HandleFunc("GET /api/system/logs", s.requireAuth(s.handleSystemLogs))
 	s.Mux.HandleFunc("GET /api/system/backup", s.requireAuth(s.handleSystemBackup))
+	s.Mux.HandleFunc("POST /api/system/restore", s.requireAuth(s.handleSystemRestore))
 
 	// Static file serving (frontend)
 	if staticFS != nil {

@@ -54,6 +54,7 @@ const ic={
   send:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>',
   plus:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>',
   dl:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
+  ul:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>',
   box:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 6V4a2 2 0 012-2h8a2 2 0 012 2v2"/></svg>',
 };
 
@@ -370,15 +371,175 @@ window.compAct=async function(a){
       else{toast('Validation errors','error');if(_term)_term.writeLine(r.error||'Invalid YAML','err')}}
     else if(a==='deploy'){
       await api('/compose/file',{method:'PUT',body:{content:ed.value}});
-      if(_term){_term.clear();_term.writeLine('Deploying stack...','info')}
+      if(_term)_term.clear();
       toast('Deploy started','info');
-      const result=await _term.connectSSE('/api/compose/deploy');
-      if(result.success){toast('Deploy completed','success')}
-      else{toast('Deploy failed: '+(result.error||'unknown error'),'error')}
+      await runDeployWithProgress();
     }
   }catch(e){toast(`Error: ${e.message}`,'error');if(_term)_term.writeLine(`Error: ${e.message}`,'err')}
   if(btn)btn.disabled=false;
 };
+
+// Run a phased deploy with progress tracking above the terminal
+async function runDeployWithProgress(){
+  let progressEl=$('#deploy-progress');
+  if(!progressEl){
+    progressEl=document.createElement('div');
+    progressEl.id='deploy-progress';
+    const termContainer=$('#terminal-container');
+    if(termContainer)termContainer.parentNode.insertBefore(progressEl,termContainer);
+    else return _term.connectSSE('/api/compose/deploy');
+  }
+  const state={phase:'init',services:[],images:[],pullStatus:{},serviceStatus:{},error:null};
+
+  function renderProgress(){
+    const phases=[
+      {id:'pull',label:'Pull Images',icon:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>'},
+      {id:'create',label:'Create & Start',icon:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>'}
+    ];
+    const phaseOrder=['init','pull','create','done'];
+    const curIdx=phaseOrder.indexOf(state.phase);
+    let html='<div class="deploy-progress-panel">';
+    html+='<div class="deploy-phases">';
+    phases.forEach((p,i)=>{
+      const pIdx=phaseOrder.indexOf(p.id);
+      let cls='deploy-phase';
+      if(state.phase===p.id)cls+=' phase-active';
+      else if(curIdx>pIdx)cls+=' phase-done';
+      else cls+=' phase-pending';
+      html+=`<div class="${cls}">${p.icon}<span>${p.label}</span></div>`;
+      if(i<phases.length-1)html+='<div class="deploy-phase-arrow"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>';
+    });
+    html+='</div>';
+    if(state.phase==='pull'||curIdx>phaseOrder.indexOf('pull')){
+      const imgs=state.images.length?state.images:Object.keys(state.pullStatus);
+      if(imgs.length){
+        html+='<div class="deploy-pull-section"><div class="deploy-section-title">Image Pull Progress</div>';
+        imgs.forEach(img=>{
+          const st=state.pullStatus[img]||'waiting';
+          const shortImg=img.split('/').pop();
+          let statusCls='pull-waiting',statusText='Waiting',statusIcon='';
+          if(st==='pulling'){statusCls='pull-active';statusText='Pulling...';statusIcon='<span class="pull-spinner"></span>'}
+          else if(st==='pulled'){statusCls='pull-done';statusText='Done';statusIcon='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>'}
+          else if(st==='error'){statusCls='pull-error';statusText='Error'}
+          html+=`<div class="deploy-pull-row ${statusCls}"><span class="pull-image-name" title="${esc(img)}">${esc(shortImg)}</span><span class="pull-status">${statusIcon} ${statusText}</span></div>`;
+        });
+        html+='</div>';
+      }
+    }
+    if(state.phase==='create'||state.phase==='done'){
+      const svcs=state.services.length?state.services:Object.keys(state.serviceStatus);
+      if(svcs.length||Object.keys(state.serviceStatus).length){
+        html+='<div class="deploy-service-section"><div class="deploy-section-title">Services</div>';
+        const allSvcs=[...new Set([...svcs,...Object.keys(state.serviceStatus)])];
+        allSvcs.forEach(svc=>{
+          const st=state.serviceStatus[svc]||'waiting';
+          let statusCls='svc-waiting',statusText='Waiting',statusIcon='';
+          if(st==='created'){statusCls='svc-created';statusText='Created';statusIcon='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>'}
+          else if(st==='started'||st==='exists'){statusCls='svc-started';statusText='Running';statusIcon='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>'}
+          else if(st==='creating'){statusCls='svc-creating';statusText='Creating...';statusIcon='<span class="pull-spinner"></span>'}
+          else if(st==='error'){statusCls='svc-error';statusText='Error'}
+          html+=`<div class="deploy-svc-row ${statusCls}"><span class="svc-name">${esc(svc)}</span><span class="svc-status">${statusIcon} ${statusText}</span></div>`;
+        });
+        html+='</div>';
+      }
+    }
+    if(state.error)html+=`<div class="deploy-error">${esc(state.error)}</div>`;
+    html+='</div>';
+    progressEl.innerHTML=html;
+  }
+
+  renderProgress();
+  let result={success:false,error:null};
+  try{
+    const resp=await fetch('/api/compose/deploy',{method:'POST'});
+    if(!resp.ok){
+      const err=await resp.json().catch(()=>({error:'HTTP '+resp.status}));
+      if(_term)_term.writeLine('Error: '+(err.error||'request failed'),'err');
+      state.error=err.error||'request failed';renderProgress();
+      return{success:false,error:state.error};
+    }
+    const reader=resp.body.getReader();
+    const decoder=new TextDecoder();
+    let buffer='';
+    while(true){
+      const{done,value}=await reader.read();
+      if(done)break;
+      buffer+=decoder.decode(value,{stream:true});
+      const parts=buffer.split('\n\n');
+      buffer=parts.pop();
+      for(const part of parts){
+        const line=part.replace(/^data: /,'').trim();
+        if(!line)continue;
+        try{
+          const data=JSON.parse(line);
+          if(data.type==='deploy_init'){
+            if(data.services)state.services=data.services;
+            if(data.images)state.images=data.images;
+            renderProgress();
+            if(_term)_term.writeLine('Deploying '+state.services.length+' service(s)...','info');
+            continue;
+          }
+          if(data.type==='phase'){
+            state.phase=data.phase;
+            if(data.status==='done'&&data.phase==='create')state.phase='done';
+            renderProgress();
+            if(data.phase==='pull'&&data.status==='starting'&&_term)_term.writeLine('--- Pulling images ---','info');
+            if(data.phase==='create'&&data.status==='starting'&&_term)_term.writeLine('--- Creating containers ---','info');
+            continue;
+          }
+          if(data.type==='pull_progress'){
+            if(data.service&&data.status){state.pullStatus[data.service]=data.status;renderProgress()}
+            if(data.line&&_term){
+              const cls=data.status==='pulled'?'ok':data.status==='pulling'?'info':'';
+              _term.writeLine(data.line,cls);
+            }
+            continue;
+          }
+          if(data.type==='service'){
+            if(data.service&&data.status){state.serviceStatus[data.service]=data.status;renderProgress()}
+            if(data.line&&_term){
+              const cls=data.status==='started'||data.status==='exists'?'ok':data.status==='created'?'info':'';
+              _term.writeLine(data.line,cls);
+            }
+            continue;
+          }
+          if(data.type==='complete'){
+            if(data.success){
+              state.phase='done';renderProgress();
+              if(_term)_term.writeLine('Deploy completed successfully.','ok');
+              toast('Deploy completed','success');
+              result={success:true};
+            }else{
+              state.error=data.error||'unknown error';renderProgress();
+              if(_term)_term.writeLine('Deploy failed: '+state.error,'err');
+              toast('Deploy failed: '+state.error,'error');
+              result={success:false,error:state.error};
+            }
+            continue;
+          }
+          if(data.type==='warning'){if(data.line&&_term)_term.writeLine(data.line,'warn');continue}
+          if(data.line&&_term){
+            const cls=data.type==='error'?'err':data.type==='success'?'ok':data.type==='warning'?'warn':data.type==='pull'?'info':'';
+            _term.writeLine(data.line,cls);
+          }
+        }catch{if(line&&_term)_term.write(line)}
+      }
+    }
+  }catch(err){
+    if(err.name==='AbortError')return{success:false,error:'cancelled'};
+    if(_term)_term.writeLine('Stream error: '+err.message,'err');
+    state.error=err.message;renderProgress();
+    return{success:false,error:err.message};
+  }
+  if(result.success){
+    setTimeout(()=>{
+      const el=$('#deploy-progress');
+      if(el)el.classList.add('deploy-progress-fade');
+      setTimeout(()=>{if(el)el.remove()},300);
+    },5000);
+  }
+  return result;
+}
 
 // ============ NETWORK MOUNTS ============
 function pgMounts(){
@@ -519,15 +680,36 @@ function pgSettings(){
 <div id="settings-disk-status">Loading disk status...</div>
 <div class="form-actions"><button class="btn btn-primary" onclick="setupWizard.show()">Set Up Disks</button>
 <button class="btn btn-secondary" onclick="settingsRescanDisks()">Rescan Disks</button></div></div>
-<div class="settings-section card animate-up"><div class="section-title">Backup &amp; Export</div>
-<p style="font-size:.85rem;color:var(--tx-d);margin-bottom:16px">Download config backup (compose files, mount configs, network settings). Docker images not included.</p>
-<button class="btn btn-secondary" onclick="exportCfg()">${ic.dl} Export Config Backup</button></div>
+<div class="settings-section card animate-up"><div class="section-title">Backup &amp; Restore</div>
+<p style="font-size:.85rem;color:var(--tx-d);margin-bottom:16px">Download or restore a config backup (compose files, mount configs, network settings). Docker images not included.</p>
+<div class="form-actions" style="gap:12px;flex-wrap:wrap">
+<button class="btn btn-secondary" onclick="exportCfg()">${ic.dl} Download Backup</button>
+<button class="btn btn-secondary" onclick="importCfg()">${ic.ul} Restore Backup</button>
+</div>
+<input type="file" id="backup-file-input" accept=".tar.gz,.tgz" style="display:none">
+<div id="restore-status" style="margin-top:12px"></div></div>
 <div class="settings-section card animate-up"><div class="card-header"><div class="section-title" style="border:none;margin:0;padding:0">System Logs</div>
 <button class="btn btn-sm btn-secondary" onclick="fetchLogs()">Refresh</button></div>
 <div class="log-viewer" id="log-viewer">Loading logs...</div></div>
 <div class="settings-section card animate-up"><div class="section-title">Danger Zone</div>
-<p style="font-size:.85rem;color:var(--tx-d);margin-bottom:16px">Reboot the server. All running containers will be stopped and restarted on boot.</p>
-<button class="btn btn-danger" onclick="rebootServer()">Reboot Server</button></div></div>`;
+<div class="danger-zone-items">
+<div class="danger-item" style="display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--bd)">
+<div><div style="font-weight:600;font-size:.9rem;margin-bottom:2px">Re-run Setup Wizard</div>
+<div style="font-size:.82rem;color:var(--tx-d)">Open the first-run setup wizard to reconfigure disks, network, and timezone.</div></div>
+<button class="btn btn-secondary" onclick="rerunSetupWizard()">Re-run Wizard</button></div>
+<div class="danger-item" style="display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--bd)">
+<div><div style="font-weight:600;font-size:.9rem;margin-bottom:2px">Wipe Config Disk</div>
+<div style="font-size:.82rem;color:var(--tx-d)">Erase all configuration data (compose files, credentials, network settings). The disk will be reformatted and current RAM config synced back.</div></div>
+<button class="btn btn-danger" onclick="wipeDisk('config')" id="btn-wipe-config">Wipe Config</button></div>
+<div class="danger-item" style="display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--bd)">
+<div><div style="font-weight:600;font-size:.9rem;margin-bottom:2px">Wipe Cache Disk</div>
+<div style="font-size:.82rem;color:var(--tx-d)">Erase all Docker images, volumes, and container data. Docker will be stopped and restarted.</div></div>
+<button class="btn btn-danger" onclick="wipeDisk('cache')" id="btn-wipe-cache">Wipe Cache</button></div>
+<div class="danger-item" style="display:flex;align-items:center;justify-content:space-between;padding:12px 0">
+<div><div style="font-weight:600;font-size:.9rem;margin-bottom:2px">Reboot Server</div>
+<div style="font-size:.82rem;color:var(--tx-d)">Reboot the server. All running containers will be stopped and restarted on boot.</div></div>
+<button class="btn btn-danger" onclick="rebootServer()">Reboot Server</button></div>
+</div></div></div>`;
   fetchSysInfo();fetchLogs();fetchSettingsDiskStatus();
 }
 
@@ -567,13 +749,46 @@ window.settingsRescanDisks=async function(){
   }catch(e){toast(`Rescan failed: ${e.message}`,'error')}
 };
 
+window.wipeDisk=async function(diskType){
+  const label=diskType==='config'?'CONFIG':'CACHE';
+  const warnings=diskType==='config'
+    ?'This will ERASE all configuration data on the config disk (compose files, credentials, network settings). Current RAM config will be synced back to the fresh disk.'
+    :'This will ERASE all Docker images, volumes, and container data on the cache disk. Docker will be stopped during the wipe.';
+  if(!confirm(`Wipe ${label} disk?\n\n${warnings}\n\nThis action cannot be undone.`))return;
+  if(!confirm(`Are you absolutely sure? Type confirms wiping the ${label} disk.`))return;
+  const btn=$(`#btn-wipe-${diskType}`);if(btn){btn.disabled=true;btn.textContent='Wiping...'}
+  try{
+    await api('/setup/wipe',{method:'POST',body:{diskType,confirmWipe:true}});
+    toast(`${label} disk wiped successfully. Reboot recommended.`,'success');
+    fetchSettingsDiskStatus();
+  }catch(e){toast(`Wipe failed: ${e.message}`,'error')}
+  finally{if(btn){btn.disabled=false;btn.textContent=`Wipe ${diskType==='config'?'Config':'Cache'}`}}
+};
+
+window.rerunSetupWizard=function(){
+  if(typeof setupWizard!=='undefined'){
+    // Clear the dismiss cookie so wizard shows fully
+    document.cookie='wraith-wizard-dismissed=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/';
+    // Reset wizard state so it fetches fresh status
+    setupWizard.show();
+  }else{
+    toast('Setup wizard is not available','error');
+  }
+};
+
 window.rebootServer=async function(){
   if(!confirm('Reboot the server? All running containers will be stopped.'))return;
+  const btn=document.querySelector('[onclick="rebootServer()"]');
+  if(btn){btn.disabled=true;btn.textContent='Saving config...';}
   try{
-    await api('/system/reboot',{method:'POST'});
-    toast('Rebooting server...','success');
-    setTimeout(()=>{document.body.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#fff;background:#0a0a0a"><div style="text-align:center"><h2>Server is rebooting...</h2><p>This page will refresh automatically.</p></div></div>';const check=setInterval(async()=>{try{await fetch('/api/system/info');clearInterval(check);location.reload()}catch{}},3000)},1000);
-  }catch(e){toast(`Reboot failed: ${e.message}`,'error')}
+    const res=await api('/system/reboot',{method:'POST'});
+    const saved=res&&res.configSaved;
+    toast(saved?'Config saved. Rebooting server...':'Rebooting server...','success');
+    setTimeout(()=>{document.body.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#fff;background:#0a0a0a"><div style="text-align:center"><h2>Server is rebooting...</h2><p>'+(saved?'Configuration was saved to disk. ':'')+'This page will refresh automatically.</p></div></div>';const check=setInterval(async()=>{try{await fetch('/api/system/info');clearInterval(check);location.reload()}catch{}},3000)},1000);
+  }catch(e){
+    if(btn){btn.disabled=false;btn.textContent='Reboot Server';}
+    toast(`Reboot failed: ${e.message}`,'error');
+  }
 };
 
 window.chgPw=async function(){
@@ -588,8 +803,38 @@ window.chgPw=async function(){
 window.exportCfg=async function(){
   try{const r=await fetch(`${API}/system/backup`);if(r.status===401){location.href='/login.html';return}
   if(!r.ok)throw new Error(`HTTP ${r.status}`);const b=await r.blob(),u=URL.createObjectURL(b),a=document.createElement('a');
-  a.href=u;a.download=`wraithos-config-${new Date().toISOString().split('T')[0]}.tar.gz`;a.click();URL.revokeObjectURL(u);toast('Exported','success')}
-  catch(e){toast(`Export failed: ${e.message}`,'error')}
+  a.href=u;a.download=`wraithos-config-${new Date().toISOString().split('T')[0]}.tar.gz`;a.click();URL.revokeObjectURL(u);toast('Backup downloaded','success')}
+  catch(e){toast(`Download failed: ${e.message}`,'error')}
+};
+
+window.importCfg=function(){
+  const input=$('#backup-file-input');
+  if(!input)return;
+  input.value='';
+  input.onchange=async function(){
+    const file=input.files[0];
+    if(!file)return;
+    if(!file.name.endsWith('.tar.gz')&&!file.name.endsWith('.tgz')){
+      toast('Please select a .tar.gz backup file','error');return;
+    }
+    if(!confirm(`Restore backup from "${file.name}"?\n\nThis will overwrite current configuration files (compose files, mount configs, network settings). A reboot is recommended after restore.`))return;
+    const status=$('#restore-status');
+    if(status)status.innerHTML='<p style="font-size:.85rem;color:var(--tx-d)">Restoring backup...</p>';
+    try{
+      const fd=new FormData();
+      fd.append('backup',file);
+      const r=await fetch(`${API}/system/restore`,{method:'POST',body:fd});
+      if(r.status===401){location.href='/login.html';return}
+      const d=await r.json();
+      if(!r.ok)throw new Error(d.error||`HTTP ${r.status}`);
+      toast(`Backup restored (${d.restored} files). Reboot recommended.`,'success');
+      if(status)status.innerHTML=`<p style="font-size:.85rem;color:var(--green)">Restored ${d.restored} files from backup. Reboot recommended to apply all changes.</p>`;
+    }catch(e){
+      toast(`Restore failed: ${e.message}`,'error');
+      if(status)status.innerHTML=`<p style="font-size:.85rem;color:var(--red)">Restore failed: ${esc(e.message)}</p>`;
+    }
+  };
+  input.click();
 };
 
 // === EXPOSE SHARED UTILS FOR EXTERNAL SCRIPTS (setup-wizard.js, etc.) ===

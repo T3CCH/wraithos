@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/wraithos/wraith-ui/internal/docker"
 )
 
 type composeContentResponse struct {
@@ -124,11 +126,57 @@ func (s *Server) streamComposeAction(w http.ResponseWriter, r *http.Request, act
 	}
 }
 
-// handleComposeDeploy runs docker compose up -d with SSE streaming.
+// handleComposeDeploy runs a phased deployment (pull then up) with structured SSE events.
+// Sends events with types: phase, pull_progress, service, output, error, warning, success, complete.
 func (s *Server) handleComposeDeploy(w http.ResponseWriter, r *http.Request) {
-	s.streamComposeAction(w, r, "deploy", func(handler func(string)) error {
-		return s.Compose.Deploy(r.Context(), handler)
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	s.Logs.Info("compose", "deploy started (SSE, phased)")
+
+	// Send initial info: list of services and images
+	services, _ := s.Compose.ListServices(r.Context())
+	images, _ := s.Compose.ListImages(r.Context())
+
+	sseEvent(w, flusher, "message", map[string]interface{}{
+		"type":     "deploy_init",
+		"services": services,
+		"images":   images,
 	})
+
+	eventHandler := func(event docker.DeployEvent) {
+		if event.Line != "" {
+			s.Logs.Info("compose", "%s", event.Line)
+		}
+		sseEvent(w, flusher, "message", event)
+	}
+
+	err := s.Compose.DeployFull(r.Context(), eventHandler)
+
+	if err != nil {
+		s.Logs.Error("compose", "deploy failed: %v", err)
+		sseEvent(w, flusher, "message", map[string]interface{}{
+			"type":    "complete",
+			"success": false,
+			"error":   err.Error(),
+		})
+	} else {
+		s.Logs.Info("compose", "deploy completed")
+		sseEvent(w, flusher, "message", map[string]interface{}{
+			"type":    "complete",
+			"success": true,
+		})
+	}
 }
 
 // handleComposeStop runs docker compose down with SSE streaming.

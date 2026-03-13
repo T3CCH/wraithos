@@ -608,6 +608,98 @@ func StartDocker() error {
 	return nil
 }
 
+// WipeDisk wipes a wraith disk by unmounting it, reformatting it with the
+// correct label, and remounting it with a clean directory layout.
+// diskType must be "config" or "cache".
+func WipeDisk(diskType string) error {
+	var label, mountpoint string
+	switch diskType {
+	case "config":
+		label = ConfigLabel
+		mountpoint = storage.ConfigBase
+	case "cache":
+		label = CacheLabel
+		mountpoint = storage.CacheDisk
+	default:
+		return fmt.Errorf("invalid disk type %q: must be \"config\" or \"cache\"", diskType)
+	}
+
+	// Find the device backing this mount point
+	ms := getMountStatus(mountpoint)
+
+	// For config disk with RAM-based architecture, check the physical disk
+	if diskType == "config" && (!ms.Persistent || ms.Type == "tmpfs") && storage.ConfigDiskDir != "" {
+		ms = getMountStatus(storage.ConfigDiskDir)
+	}
+
+	if !ms.Persistent || ms.Device == "" {
+		return fmt.Errorf("%s disk is not on a persistent device (currently %s)", diskType, ms.Type)
+	}
+
+	device := ms.Device
+	if err := ValidateDevice(device); err != nil {
+		return err
+	}
+
+	// Stop Docker before wiping cache disk
+	if diskType == "cache" {
+		if err := StopDocker(); err != nil {
+			log.Printf("warning: failed to stop docker for cache wipe: %v", err)
+		}
+	}
+
+	// Unmount and reformat
+	if err := unmountAndFormat(device, label); err != nil {
+		if diskType == "cache" {
+			StartDocker()
+		}
+		return fmt.Errorf("wipe %s disk: %w", diskType, err)
+	}
+
+	// For config disk, also unmount the config-disk sync dir
+	if diskType == "config" && storage.ConfigDiskDir != "" {
+		if isMountpointActive(storage.ConfigDiskDir) {
+			cmd := exec.Command("umount", storage.ConfigDiskDir)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				log.Printf("warning: unmount %s failed: %s", storage.ConfigDiskDir, strings.TrimSpace(string(output)))
+			}
+		}
+	}
+
+	// Remount at the appropriate location
+	if diskType == "config" {
+		// Mount at config-disk dir for sync-back
+		if storage.ConfigDiskDir != "" {
+			if err := MountDisk(device, storage.ConfigDiskDir); err != nil {
+				return fmt.Errorf("remount config disk at %s: %w", storage.ConfigDiskDir, err)
+			}
+			if err := InitConfigLayout(storage.ConfigDiskDir); err != nil {
+				return fmt.Errorf("init config layout: %w", err)
+			}
+			// Sync current RAM config to the fresh disk
+			cpCmd := exec.Command("cp", "-a", mountpoint+"/.", storage.ConfigDiskDir+"/")
+			if output, cpErr := cpCmd.CombinedOutput(); cpErr != nil {
+				log.Printf("warning: config sync after wipe failed: %s", strings.TrimSpace(string(output)))
+			}
+		}
+	} else {
+		// Cache disk: mount directly
+		if err := MountDisk(device, mountpoint); err != nil {
+			StartDocker()
+			return fmt.Errorf("remount cache disk: %w", err)
+		}
+		if err := InitCacheLayout(mountpoint); err != nil {
+			StartDocker()
+			return fmt.Errorf("init cache layout: %w", err)
+		}
+		if err := StartDocker(); err != nil {
+			log.Printf("warning: failed to restart docker after cache wipe: %v", err)
+		}
+	}
+
+	return nil
+}
+
 // NeedsDiskSetup returns true if either wraith mount point is on tmpfs.
 func NeedsDiskSetup() bool {
 	config, cache := GetDiskStatus()

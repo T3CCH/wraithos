@@ -501,12 +501,12 @@ async function renderStepNetwork(body,footer){
       formEl.innerHTML=`
 <div class="toggle-wrap" style="margin-bottom:24px">
   <label class="toggle">
-    <input type="checkbox" id="wiz-net-dhcp" ${n.dhcp!==false?'checked':''} onchange="wizTogDHCP(this.checked)">
+    <input type="checkbox" id="wiz-net-dhcp" checked onchange="wizTogDHCP(this.checked)">
     <span class="toggle-track"></span><span class="toggle-thumb"></span>
   </label>
-  <span class="toggle-label">Use DHCP</span>
+  <span class="toggle-label">Use DHCP <span class="dim" style="font-size:.85em">(recommended)</span></span>
 </div>
-<div id="wiz-static-fields" ${n.dhcp!==false?'style="opacity:0.3;pointer-events:none"':''}>
+<div id="wiz-static-fields" class="hidden">
   <div class="form-grid">
     <div class="form-group"><label class="form-label">IP Address</label>
       <input class="form-input" id="wiz-net-ip" placeholder="192.168.1.100" value="${esc(n.ip||'')}"></div>
@@ -528,7 +528,8 @@ async function renderStepNetwork(body,footer){
 
 window.wizTogDHCP=function(on){
   const f=$('#wiz-static-fields');
-  if(f){f.style.opacity=on?'0.3':'1';f.style.pointerEvents=on?'none':'auto'}
+  if(!f)return;
+  if(on){f.classList.add('hidden')}else{f.classList.remove('hidden')}
 };
 
 window.wizardSaveNetwork=async function(){
@@ -668,9 +669,12 @@ function renderStepSummary(body,footer){
 
 window.wizardReboot=async function(){
   if(!confirm('Reboot the system now?'))return;
+  const btn=document.querySelector('[onclick="wizardReboot()"]');
+  if(btn){btn.disabled=true;btn.textContent='Saving config...';}
   try{
-    await api('/system/reboot',{method:'POST'});
-    toast('Rebooting...','info');
+    const res=await api('/system/reboot',{method:'POST'});
+    const saved=res&&res.configSaved;
+    toast(saved?'Config saved. Rebooting...':'Rebooting...','info');
     setupWizard.close();
     // Show a rebooting overlay
     const overlay=document.createElement('div');
@@ -678,7 +682,7 @@ window.wizardReboot=async function(){
     overlay.innerHTML=`<div class="wizard-card" style="text-align:center;padding:48px">
       <div class="spinner" style="width:32px;height:32px;border-width:3px;margin:0 auto 16px"></div>
       <h2>Rebooting...</h2>
-      <p class="dim" style="margin-top:8px">The system is restarting. This page will reload automatically.</p>
+      <p class="dim" style="margin-top:8px">${saved?'Configuration saved to disk. ':''}The system is restarting. This page will reload automatically.</p>
     </div>`;
     document.body.appendChild(overlay);
     // Poll for reconnection
@@ -686,6 +690,7 @@ window.wizardReboot=async function(){
       try{const r=await fetch('/api/auth/status');if(r.ok){clearInterval(pollReboot);location.reload()}}catch{}
     },3000);
   }catch(e){
+    if(btn){btn.disabled=false;btn.textContent='Reboot Now';}
     toast(`Reboot failed: ${e.message}`,'error');
   }
 };

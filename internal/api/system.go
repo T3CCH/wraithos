@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -14,6 +15,8 @@ import (
 	"github.com/wraithos/wraith-ui/internal/storage"
 	"github.com/wraithos/wraith-ui/internal/system"
 )
+
+const maxBackupSize = 100 << 20 // 100 MB upload limit
 
 // systemInfoResponse matches what the frontend JS expects.
 type systemInfoResponse struct {
@@ -155,6 +158,129 @@ func addDirToTar(tw *tar.Writer, dir string) error {
 		}
 
 		return nil
+	})
+}
+
+// handleSystemRestore accepts an uploaded tar.gz backup and restores config
+// files to the config directory. It validates the archive structure before
+// extracting to prevent path traversal attacks.
+func (s *Server) handleSystemRestore(w http.ResponseWriter, r *http.Request) {
+	// Limit upload size
+	r.Body = http.MaxBytesReader(w, r.Body, maxBackupSize)
+
+	file, header, err := r.FormFile("backup")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "backup file required")
+		return
+	}
+	defer file.Close()
+
+	// Validate file extension
+	if !strings.HasSuffix(header.Filename, ".tar.gz") && !strings.HasSuffix(header.Filename, ".tgz") {
+		writeError(w, http.StatusBadRequest, "file must be a .tar.gz archive")
+		return
+	}
+
+	gzReader, err := gzip.NewReader(file)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid gzip archive")
+		return
+	}
+	defer gzReader.Close()
+
+	tarReader := tar.NewReader(gzReader)
+
+	// The backup archive stores files with paths like "config/auth.json",
+	// "config/compose/docker-compose.yml", etc. We strip the leading
+	// directory component ("config/") and write into ConfigBase.
+	configDirName := filepath.Base(storage.ConfigBase) // "config"
+	restored := 0
+
+	for {
+		hdr, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "corrupt tar archive")
+			return
+		}
+
+		// Sanitize: the archive path must start with the config dir name
+		clean := filepath.Clean(hdr.Name)
+		if !strings.HasPrefix(clean, configDirName+"/") && clean != configDirName {
+			continue // skip entries outside the config directory
+		}
+
+		// Strip the leading config dir name to get relative path
+		rel := strings.TrimPrefix(clean, configDirName+"/")
+		if rel == "" {
+			continue // skip the directory entry itself
+		}
+
+		// Security: reject any path traversal attempts
+		if strings.Contains(rel, "..") {
+			continue
+		}
+
+		destPath := filepath.Join(storage.ConfigBase, rel)
+
+		// Ensure the destination is still under ConfigBase
+		if !strings.HasPrefix(destPath, storage.ConfigBase) {
+			continue
+		}
+
+		if hdr.Typeflag == tar.TypeDir {
+			if err := os.MkdirAll(destPath, 0755); err != nil {
+				s.Logs.Error("restore", "create dir %s: %v", destPath, err)
+			}
+			continue
+		}
+
+		// Only restore regular files
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+
+		// Ensure parent directory exists
+		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+			s.Logs.Error("restore", "create parent dir for %s: %v", destPath, err)
+			continue
+		}
+
+		data, err := io.ReadAll(io.LimitReader(tarReader, maxBackupSize))
+		if err != nil {
+			s.Logs.Error("restore", "read %s from archive: %v", rel, err)
+			continue
+		}
+
+		perm := os.FileMode(0644)
+		if hdr.Mode != 0 {
+			perm = os.FileMode(hdr.Mode) & 0755
+		}
+
+		if err := os.WriteFile(destPath, data, perm); err != nil {
+			s.Logs.Error("restore", "write %s: %v", destPath, err)
+			continue
+		}
+
+		restored++
+	}
+
+	if restored == 0 {
+		writeError(w, http.StatusBadRequest, "no config files found in archive")
+		return
+	}
+
+	// Sync restored files to physical config disk
+	if err := storage.SyncAll(); err != nil {
+		s.Logs.Error("restore", "sync to disk failed: %v", err)
+	}
+
+	s.Logs.Info("system", "config backup restored (%d files)", restored)
+	writeOK(w, map[string]interface{}{
+		"status":   "restored",
+		"restored": restored,
 	})
 }
 

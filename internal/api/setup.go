@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/wraithos/wraith-ui/internal/setup"
+	"github.com/wraithos/wraith-ui/internal/storage"
 )
 
 // --- Setup status ---
@@ -121,6 +122,54 @@ func (s *Server) handleSetupDisks(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, resp)
 }
 
+// --- Disk wipe ---
+
+type diskWipeRequest struct {
+	DiskType    string `json:"diskType"`    // "config" or "cache"
+	ConfirmWipe bool   `json:"confirmWipe"` // must be true
+}
+
+// handleDiskWipe reformats a wraith disk, erasing all data (POST /api/setup/wipe).
+func (s *Server) handleDiskWipe(w http.ResponseWriter, r *http.Request) {
+	var req diskWipeRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if !req.ConfirmWipe {
+		writeError(w, http.StatusBadRequest, "confirmWipe must be true to proceed")
+		return
+	}
+
+	if req.DiskType != "config" && req.DiskType != "cache" {
+		writeError(w, http.StatusBadRequest, "diskType must be \"config\" or \"cache\"")
+		return
+	}
+
+	// Prevent concurrent disk operations
+	if !setup.AcquireSetup() {
+		writeError(w, http.StatusConflict, "a disk operation is already in progress")
+		return
+	}
+	defer setup.ReleaseSetup()
+
+	s.Logs.Info("setup", "wiping %s disk", req.DiskType)
+
+	if err := setup.WipeDisk(req.DiskType); err != nil {
+		s.Logs.Error("setup", "wipe %s disk failed: %v", req.DiskType, err)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.Logs.Info("setup", "%s disk wiped successfully", req.DiskType)
+	writeOK(w, map[string]interface{}{
+		"status":            "wiped",
+		"diskType":          req.DiskType,
+		"rebootRecommended": true,
+	})
+}
+
 // --- Rescan ---
 
 type rescanResponse struct {
@@ -194,15 +243,26 @@ func (s *Server) handleTimezoneSet(w http.ResponseWriter, r *http.Request) {
 
 // --- Reboot ---
 
-// handleReboot triggers a system reboot with a 3-second delay
-// (POST /api/system/reboot).
+// handleReboot syncs config to the persistent disk then triggers a system
+// reboot with a 3-second delay (POST /api/system/reboot).
 func (s *Server) handleReboot(w http.ResponseWriter, r *http.Request) {
-	s.Logs.Info("system", "reboot requested via API")
+	s.Logs.Info("system", "reboot requested via API -- syncing config to disk")
+
+	// Sync all config files to the physical config disk before rebooting.
+	// This ensures nothing in the RAM config is lost on reboot.
+	if err := storage.SyncAll(); err != nil {
+		s.Logs.Error("system", "pre-reboot config sync failed: %v", err)
+		writeError(w, http.StatusInternalServerError,
+			"failed to save config before reboot: "+err.Error())
+		return
+	}
+	s.Logs.Info("system", "config synced to disk, proceeding with reboot")
 
 	// Send response before rebooting
 	writeOK(w, map[string]interface{}{
-		"status": "rebooting",
-		"delay":  3,
+		"status":     "rebooting",
+		"delay":      3,
+		"configSaved": true,
 	})
 
 	// Schedule reboot after a short delay so the HTTP response can be sent
