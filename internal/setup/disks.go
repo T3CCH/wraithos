@@ -192,8 +192,25 @@ func hasChildAtSystemMount(children []lsblkDevice) bool {
 
 // GetDiskStatus checks /proc/mounts to determine whether /wraith/config
 // and /wraith/cache are backed by tmpfs or real block devices.
+// For the config disk, the RAM-based architecture means ConfigBase is
+// always tmpfs, so we also check ConfigDiskDir for the physical disk.
 func GetDiskStatus() (config, cache MountStatus) {
 	config = getMountStatus(storage.ConfigBase)
+
+	// With the RAM-based config architecture, ConfigBase is always tmpfs
+	// but the physical config disk is mounted at ConfigDiskDir.
+	// If ConfigDiskDir has a real device mounted, config is persistent.
+	if config.Mounted && !config.Persistent && storage.ConfigDiskDir != "" {
+		diskStatus := getMountStatus(storage.ConfigDiskDir)
+		if diskStatus.Mounted && diskStatus.Persistent {
+			config.Persistent = true
+			config.Device = diskStatus.Device
+			config.Label = diskStatus.Label
+			// Keep the type as "tmpfs (ram-backed)" for clarity
+			config.Type = "tmpfs+disk"
+		}
+	}
+
 	cache = getMountStatus(storage.CacheDisk)
 	return config, cache
 }
@@ -354,6 +371,11 @@ func FormatDisk(device, label string) error {
 	diskMu.Lock()
 	defer diskMu.Unlock()
 
+	return formatDiskLocked(device, label)
+}
+
+// formatDiskLocked does the actual format work. Caller must hold diskMu.
+func formatDiskLocked(device, label string) error {
 	if err := ValidateDevice(device); err != nil {
 		return err
 	}
@@ -370,6 +392,35 @@ func FormatDisk(device, label string) error {
 	}
 
 	return nil
+}
+
+// unmountAndFormat unmounts a device (if mounted) and formats it atomically
+// under diskMu so nothing can remount between unmount and format.
+func unmountAndFormat(device, label string) error {
+	diskMu.Lock()
+	defer diskMu.Unlock()
+
+	// Unmount the device if it's currently mounted anywhere
+	if mnt := isDeviceMounted(device); mnt != "" {
+		log.Printf("unmounting %s from %s before format", device, mnt)
+		umountCmd := exec.Command("umount", device)
+		if output, err := umountCmd.CombinedOutput(); err != nil {
+			log.Printf("normal unmount failed (%s), trying lazy unmount", strings.TrimSpace(string(output)))
+			lazyCmd := exec.Command("umount", "-l", device)
+			if output, err := lazyCmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("unmount %s: %s: %w", device, strings.TrimSpace(string(output)), err)
+			}
+			// Wait for lazy unmount to complete
+			for i := 0; i < 15; i++ {
+				if isDeviceMounted(device) == "" {
+					break
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+		}
+	}
+
+	return formatDiskLocked(device, label)
 }
 
 // MountDisk mounts a device at the given mount point, creating it if needed.
@@ -519,12 +570,22 @@ func InitCacheLayout(base string) error {
 }
 
 // StopDocker stops the Docker daemon via the OpenRC service.
+// Stops both the wraith-docker compose wrapper and the stock docker service.
 func StopDocker() error {
 	log.Printf("stopping Docker daemon for cache disk format")
+
+	// Stop compose stack first
 	cmd := exec.Command("rc-service", "wraith-docker", "stop")
+	cmd.CombinedOutput() // ignore errors -- may not be running
+
+	// Stop the stock docker daemon
+	cmd = exec.Command("rc-service", "docker", "stop")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("stop docker: %s: %w", strings.TrimSpace(string(output)), err)
+		// Try direct kill as fallback
+		log.Printf("rc-service docker stop failed (%s), trying direct stop", strings.TrimSpace(string(output)))
+		exec.Command("pkill", "-TERM", "dockerd").Run()
+		time.Sleep(3 * time.Second)
 	}
 	return nil
 }
@@ -532,11 +593,18 @@ func StopDocker() error {
 // StartDocker starts the Docker daemon via the OpenRC service.
 func StartDocker() error {
 	log.Printf("starting Docker daemon after cache disk format")
-	cmd := exec.Command("rc-service", "wraith-docker", "start")
+
+	// Start the stock docker service
+	cmd := exec.Command("rc-service", "docker", "start")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("start docker: %s: %w", strings.TrimSpace(string(output)), err)
 	}
+
+	// Start the wraith-docker compose deployer
+	cmd = exec.Command("rc-service", "wraith-docker", "start")
+	cmd.CombinedOutput() // ignore errors
+
 	return nil
 }
 
@@ -602,18 +670,18 @@ func SetupDisk(device, label string) (*DiskSetupResult, []string, error) {
 			}
 		}
 
+		// Unmount and format under one lock so nothing can remount between
+		if err := unmountAndFormat(device, label); err != nil {
+			if label == CacheLabel {
+				StartDocker()
+			}
+			return nil, nil, err
+		}
+
 		// Check if mountpoint is currently tmpfs and need migration
 		ms := getMountStatus(mountpoint)
 
 		if ms.Mounted && !ms.Persistent {
-			// Format the disk first (it's not mounted at our mountpoint)
-			if err := FormatDisk(device, label); err != nil {
-				if label == CacheLabel {
-					StartDocker()
-				}
-				return nil, nil, err
-			}
-
 			// Migrate tmpfs content to the new disk
 			var err error
 			migrated, err = MigrateTmpfs(device, mountpoint)
@@ -624,13 +692,7 @@ func SetupDisk(device, label string) (*DiskSetupResult, []string, error) {
 				return nil, nil, fmt.Errorf("migrate tmpfs for %s: %w", label, err)
 			}
 		} else {
-			// Format and mount directly
-			if err := FormatDisk(device, label); err != nil {
-				if label == CacheLabel {
-					StartDocker()
-				}
-				return nil, nil, err
-			}
+			// Mount directly (already formatted above)
 			if err := MountDisk(device, mountpoint); err != nil {
 				if label == CacheLabel {
 					StartDocker()
@@ -651,6 +713,26 @@ func SetupDisk(device, label string) (*DiskSetupResult, []string, error) {
 	if label == ConfigLabel {
 		if err := InitConfigLayout(mountpoint); err != nil {
 			return nil, nil, fmt.Errorf("init config layout: %w", err)
+		}
+
+		// Also mount at ConfigDiskDir for sync-back support.
+		// After reboot, the init script will handle this, but we set it up
+		// now so that config writes sync to disk immediately.
+		if storage.ConfigDiskDir != "" && !isMountpointActive(storage.ConfigDiskDir) {
+			if err := MountDisk(device, storage.ConfigDiskDir); err != nil {
+				log.Printf("warning: could not mount config disk at %s for sync-back: %v",
+					storage.ConfigDiskDir, err)
+			} else {
+				// Initialize layout on the physical disk too
+				InitConfigLayout(storage.ConfigDiskDir)
+				// Copy current config to physical disk
+				cpCmd := exec.Command("cp", "-a", mountpoint+"/.", storage.ConfigDiskDir+"/")
+				if output, cpErr := cpCmd.CombinedOutput(); cpErr != nil {
+					log.Printf("warning: initial config sync failed: %s", strings.TrimSpace(string(output)))
+				} else {
+					log.Printf("config synced to physical disk at %s", storage.ConfigDiskDir)
+				}
+			}
 		}
 	} else {
 		if err := InitCacheLayout(mountpoint); err != nil {

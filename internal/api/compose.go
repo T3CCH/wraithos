@@ -1,8 +1,11 @@
 package api
 
 import (
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 type composeContentResponse struct {
@@ -45,72 +48,108 @@ func (s *Server) handleComposeSave(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, map[string]string{"status": "saved"})
 }
 
-// handleComposeDeploy runs docker compose up -d.
+// sseEvent writes a single SSE event to the response writer and flushes.
+func sseEvent(w http.ResponseWriter, flusher http.Flusher, eventType string, data interface{}) {
+	jsonBytes, err := json.Marshal(data)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(w, "data: %s\n\n", jsonBytes)
+	flusher.Flush()
+	_ = eventType // reserved for future named event types
+}
+
+// classifyLine categorizes a compose output line for frontend color-coding.
+func classifyLine(line string) string {
+	lower := strings.ToLower(line)
+	if strings.Contains(lower, "error") || strings.Contains(lower, "fatal") {
+		return "error"
+	}
+	if strings.Contains(lower, "warning") || strings.Contains(lower, "warn") {
+		return "warning"
+	}
+	if strings.Contains(lower, "pulling") || strings.Contains(lower, "download") ||
+		strings.Contains(lower, "extracting") || strings.Contains(lower, "waiting") {
+		return "pull"
+	}
+	if strings.Contains(lower, "created") || strings.Contains(lower, "started") ||
+		strings.Contains(lower, "running") || strings.Contains(lower, "done") {
+		return "success"
+	}
+	return "output"
+}
+
+// streamComposeAction runs a compose operation with SSE output streaming.
+// It sets SSE headers, streams each output line as a JSON event, and sends
+// a final complete/error event when the operation finishes.
+func (s *Server) streamComposeAction(w http.ResponseWriter, r *http.Request, action string, fn func(handler func(string)) error) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	s.Logs.Info("compose", "%s started (SSE)", action)
+
+	outputHandler := func(line string) {
+		s.Logs.Info("compose", "%s", line)
+		sseEvent(w, flusher, "message", map[string]string{
+			"type": classifyLine(line),
+			"line": line,
+		})
+	}
+
+	err := fn(outputHandler)
+
+	if err != nil {
+		s.Logs.Error("compose", "%s failed: %v", action, err)
+		sseEvent(w, flusher, "message", map[string]interface{}{
+			"type":    "complete",
+			"success": false,
+			"error":   err.Error(),
+		})
+	} else {
+		s.Logs.Info("compose", "%s completed", action)
+		sseEvent(w, flusher, "message", map[string]interface{}{
+			"type":    "complete",
+			"success": true,
+		})
+	}
+}
+
+// handleComposeDeploy runs docker compose up -d with SSE streaming.
 func (s *Server) handleComposeDeploy(w http.ResponseWriter, r *http.Request) {
-	s.Logs.Info("compose", "deploying stack")
-
-	err := s.Compose.Deploy(r.Context(), func(line string) {
-		s.Logs.Info("compose", "%s", line)
+	s.streamComposeAction(w, r, "deploy", func(handler func(string)) error {
+		return s.Compose.Deploy(r.Context(), handler)
 	})
-	if err != nil {
-		s.Logs.Error("compose", "deploy failed: %v", err)
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	s.Logs.Info("compose", "deploy completed")
-	writeOK(w, map[string]string{"status": "deployed"})
 }
 
-// handleComposeStop runs docker compose down.
+// handleComposeStop runs docker compose down with SSE streaming.
 func (s *Server) handleComposeStop(w http.ResponseWriter, r *http.Request) {
-	s.Logs.Info("compose", "stopping stack")
-
-	err := s.Compose.Stop(r.Context(), func(line string) {
-		s.Logs.Info("compose", "%s", line)
+	s.streamComposeAction(w, r, "stop", func(handler func(string)) error {
+		return s.Compose.Stop(r.Context(), handler)
 	})
-	if err != nil {
-		s.Logs.Error("compose", "stop failed: %v", err)
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	s.Logs.Info("compose", "stack stopped")
-	writeOK(w, map[string]string{"status": "stopped"})
 }
 
-// handleComposeRestart runs down then up.
+// handleComposeRestart runs down then up with SSE streaming.
 func (s *Server) handleComposeRestart(w http.ResponseWriter, r *http.Request) {
-	s.Logs.Info("compose", "restarting stack")
-
-	err := s.Compose.Restart(r.Context(), func(line string) {
-		s.Logs.Info("compose", "%s", line)
+	s.streamComposeAction(w, r, "restart", func(handler func(string)) error {
+		return s.Compose.Restart(r.Context(), handler)
 	})
-	if err != nil {
-		s.Logs.Error("compose", "restart failed: %v", err)
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	s.Logs.Info("compose", "stack restarted")
-	writeOK(w, map[string]string{"status": "restarted"})
 }
 
-// handleComposePull pulls latest images for all services.
+// handleComposePull pulls latest images with SSE streaming.
 func (s *Server) handleComposePull(w http.ResponseWriter, r *http.Request) {
-	s.Logs.Info("compose", "pulling images")
-
-	err := s.Compose.Pull(r.Context(), func(line string) {
-		s.Logs.Info("compose", "%s", line)
+	s.streamComposeAction(w, r, "pull", func(handler func(string)) error {
+		return s.Compose.Pull(r.Context(), handler)
 	})
-	if err != nil {
-		s.Logs.Error("compose", "pull failed: %v", err)
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	s.Logs.Info("compose", "pull completed")
-	writeOK(w, map[string]string{"status": "pulled"})
 }
 
 // handleComposeValidate validates a compose file without saving it.

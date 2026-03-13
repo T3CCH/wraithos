@@ -1,0 +1,39 @@
+# Dockerfile.iso-builder - Alpine-based ISO builder for WraithOS
+#
+# Builds a UEFI-bootable ISO containing:
+#   - Alpine Linux rootfs with linux-virt kernel
+#   - Docker + docker-compose
+#   - WraithOS custom init scripts and services
+#   - wraith-ui Go binary
+#   - squashfs compressed root filesystem
+#   - GRUB EFI bootloader
+#
+# Usage:
+#   docker build -f build/Dockerfile.iso-builder -t wraithos-builder .
+#   docker run --rm -v $(pwd)/build:/out wraithos-builder
+
+FROM alpine:3.21
+
+# Install build tools
+RUN apk add --no-cache \
+    alpine-sdk \
+    xorriso \
+    squashfs-tools \
+    grub-efi \
+    grub-bios \
+    mtools \
+    dosfstools \
+    abuild \
+    sudo \
+    git \
+    mkinitfs \
+    e2fsprogs
+
+# Copy project files
+COPY os/ /build/os/
+COPY build/wraith-ui /build/wraith-ui
+COPY build/build-iso-docker.sh /build/build-iso-docker.sh
+
+RUN chmod +x /build/build-iso-docker.sh
+
+ENTRYPOINT ["/build/build-iso-docker.sh"]

@@ -1,7 +1,7 @@
 /* ============================================
    WraithOS Terminal Component
    Lightweight terminal output viewer
-   Supports WebSocket streaming and static content
+   Supports SSE streaming, WebSocket, and static content
    ============================================ */
 
 class WraithTerminal {
@@ -11,6 +11,7 @@ class WraithTerminal {
     this.autoScroll = true;
     this.lines = [];
     this.ws = null;
+    this.sse = null;
     this._build();
   }
 
@@ -86,12 +87,89 @@ class WraithTerminal {
     }
   }
 
+  // Map SSE event types from backend to terminal line classes
+  _sseTypeToClass(type) {
+    switch (type) {
+      case 'error':   return 'err';
+      case 'warning': return 'warn';
+      case 'pull':    return 'info';
+      case 'success': return 'ok';
+      default:        return '';
+    }
+  }
+
+  // Connect to a streaming endpoint via POST fetch.
+  // Reads the SSE-formatted response body as a stream.
+  // Returns a Promise that resolves with {success: bool, error?: string}
+  // when the operation completes.
+  connectSSE(url) {
+    this.disconnectSSE();
+    this._sseAbort = new AbortController();
+    const signal = this._sseAbort.signal;
+    return (async () => {
+      try {
+        const resp = await fetch(url, { method: 'POST', signal });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({ error: 'HTTP ' + resp.status }));
+          this.writeLine('Error: ' + (err.error || 'request failed'), 'err');
+          return { success: false, error: err.error || 'request failed' };
+        }
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let result = { success: false, error: null };
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          // Parse SSE lines: "data: {...}\n\n"
+          const parts = buffer.split('\n\n');
+          buffer = parts.pop(); // keep incomplete part
+          for (const part of parts) {
+            const line = part.replace(/^data: /, '').trim();
+            if (!line) continue;
+            try {
+              const data = JSON.parse(line);
+              if (data.type === 'complete') {
+                if (data.success) {
+                  this.writeLine('Operation completed successfully.', 'ok');
+                  result = { success: true, error: null };
+                } else {
+                  this.writeLine('Operation failed: ' + (data.error || 'unknown error'), 'err');
+                  result = { success: false, error: data.error || 'unknown error' };
+                }
+              } else {
+                const cls = this._sseTypeToClass(data.type);
+                this.writeLine(data.line || '', cls);
+              }
+            } catch {
+              if (line) this.write(line);
+            }
+          }
+        }
+        this._sseAbort = null;
+        return result;
+      } catch (err) {
+        if (err.name === 'AbortError') return { success: false, error: 'cancelled' };
+        this.writeLine('Stream error: ' + err.message, 'err');
+        return { success: false, error: err.message };
+      }
+    })();
+  }
+
+  disconnectSSE() {
+    if (this._sseAbort) {
+      this._sseAbort.abort();
+      this._sseAbort = null;
+    }
+  }
+
   clear() {
     this.body.innerHTML = '';
     this.lines = [];
   }
 
-  // Connect to WebSocket for streaming output
+  // Connect to WebSocket for streaming output (legacy, kept for compatibility)
   connectWS(url) {
     this.disconnectWS();
     try {
@@ -127,6 +205,7 @@ class WraithTerminal {
 
   destroy() {
     this.disconnectWS();
+    this.disconnectSSE();
     this.container.innerHTML = '';
   }
 }

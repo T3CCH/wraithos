@@ -10,6 +10,7 @@ WRAITH_CACHE_LABEL="WRAITH-CACHE"
 
 # Mount points
 WRAITH_CONFIG_DIR="/wraith/config"
+WRAITH_CONFIG_DISK_DIR="/wraith/config-disk"
 WRAITH_CACHE_DIR="/wraith/cache"
 
 # Docker settings

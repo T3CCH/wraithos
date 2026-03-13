@@ -1,139 +1,80 @@
 #!/sbin/openrc-run
-# wraith-docker - Configure and start Docker with WraithOS settings
+# wraith-docker - Deploy and manage the docker-compose stack for WraithOS
 #
-# Writes daemon.json with the correct data-root (cache disk),
-# overlay2 storage driver, and sensible defaults. After dockerd
-# starts, deploys any docker-compose stack found on the config disk.
+# The stock Alpine 'docker' service handles the actual dockerd lifecycle.
+# daemon.json is written by wraith-disks (which runs before docker).
+# This service deploys the compose stack after Docker is ready.
 
-description="Configure and start Docker for WraithOS"
+description="Deploy WraithOS docker-compose stack"
 
 # Load configuration
 . /etc/conf.d/wraith
 
-command="/usr/bin/dockerd"
-command_background=true
-pidfile="/var/run/docker.pid"
-output_log="/var/log/wraith-docker.log"
-error_log="/var/log/wraith-docker.log"
-
 depend() {
-    need wraith-disks wraith-network
-    before wraith-samba wraith-ui
+    need docker wraith-disks
+    before wraith-samba
 }
 
-# Write Docker daemon configuration.
-# data-root points to the cache disk so images persist across reboots.
-write_daemon_config() {
-    local data_root="$1"
-
-    mkdir -p /etc/docker
-    mkdir -p "$data_root"
-
-    cat > /etc/docker/daemon.json <<EOF
-{
-    "data-root": "${data_root}",
-    "storage-driver": "overlay2",
-    "dns": ["${WRAITH_DOCKER_DNS}"],
-    "log-driver": "json-file",
-    "log-opts": {
-        "max-size": "${WRAITH_DOCKER_LOG_MAX_SIZE}",
-        "max-file": "${WRAITH_DOCKER_LOG_MAX_FILE}"
-    },
-    "live-restore": true,
-    "iptables": true,
-    "userland-proxy": false
-}
-EOF
-}
-
-# Wait for Docker daemon to be ready (socket exists and responds).
 wait_for_docker() {
-    local timeout=30
-    local i=0
-
-    while [ "$i" -lt "$timeout" ]; do
+    local max_wait=30
+    local waited=0
+    while [ $waited -lt $max_wait ]; do
         if docker info >/dev/null 2>&1; then
             return 0
         fi
         sleep 1
-        i=$((i + 1))
+        waited=$((waited + 1))
     done
-
-    ewarn "Docker did not become ready within ${timeout}s"
     return 1
 }
 
-# Deploy the docker-compose stack from the config disk if present.
-deploy_compose_stack() {
+start() {
+    ebegin "WraithOS compose stack"
+
     local compose_dir="$WRAITH_CONFIG_DIR/compose"
     local compose_file="$compose_dir/docker-compose.yml"
 
     if [ ! -f "$compose_file" ]; then
-        einfo "No compose stack found at $compose_file -- skipping"
+        einfo "No compose stack found -- skipping deploy"
+        eend 0
         return 0
+    fi
+
+    einfo "Waiting for Docker daemon..."
+    if ! wait_for_docker; then
+        ewarn "Docker daemon not ready after 30s -- skipping compose deploy"
+        eend 1
+        return 1
     fi
 
     einfo "Deploying docker-compose stack from config disk"
 
-    # Load .env if present
     local env_flag=""
     if [ -f "$compose_dir/.env" ]; then
         env_flag="--env-file $compose_dir/.env"
     fi
 
-    # Use docker compose (v2 plugin, standard in Alpine docker package)
     # shellcheck disable=SC2086
     docker compose -f "$compose_file" $env_flag up -d 2>&1 \
         | while read -r line; do einfo "  compose: $line"; done
 
     if [ ${PIPESTATUS[0]} -ne 0 ]; then
         ewarn "docker compose up failed -- check logs"
+        eend 1
         return 1
     fi
 
     einfo "Compose stack deployed successfully"
-}
-
-start_pre() {
-    local data_root="$WRAITH_DOCKER_DATA_ROOT"
-
-    # If cache disk is not mounted, Docker will use a tmpfs fallback.
-    # This means images won't persist, but the system stays functional.
-    if ! mountpoint -q "$WRAITH_CACHE_DIR" 2>/dev/null; then
-        ewarn "Cache disk not mounted -- Docker storage will be ephemeral"
-        data_root="/tmp/wraith-docker"
-    fi
-
-    write_daemon_config "$data_root"
-}
-
-start_post() {
-    if wait_for_docker; then
-        einfo "Docker daemon ready"
-        deploy_compose_stack
-    fi
+    eend 0
 }
 
 stop() {
-    ebegin "Stopping Docker"
+    ebegin "Stopping WraithOS compose stack"
 
-    # Stop compose stack gracefully first
     local compose_file="$WRAITH_CONFIG_DIR/compose/docker-compose.yml"
     if [ -f "$compose_file" ] && docker info >/dev/null 2>&1; then
         einfo "Stopping compose stack..."
         docker compose -f "$compose_file" down --timeout 30 2>/dev/null || true
-    fi
-
-    # Stop dockerd
-    if [ -f "$pidfile" ]; then
-        kill "$(cat "$pidfile")" 2>/dev/null || true
-
-        # Wait for clean shutdown
-        local i=0
-        while [ "$i" -lt 15 ] && [ -f "$pidfile" ]; do
-            sleep 1
-            i=$((i + 1))
-        done
     fi
 
     eend 0

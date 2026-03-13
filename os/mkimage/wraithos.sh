@@ -103,7 +103,7 @@ build_wraithos() {
     chmod 755 "$_rootfs"/etc/local.d/*.start 2>/dev/null || true
 
     # Enable WraithOS services at default runlevel
-    for svc in wraith-disks wraith-network wraith-docker wraith-samba wraith-ui; do
+    for svc in docker wraith-disks wraith-network wraith-docker wraith-samba wraith-ui; do
         mkdir -p "$_rootfs/etc/runlevels/default"
         ln -sf "/etc/init.d/$svc" "$_rootfs/etc/runlevels/default/$svc"
     done
@@ -113,12 +113,12 @@ build_wraithos() {
     ln -sf /etc/init.d/local "$_rootfs/etc/runlevels/default/local"
 
     # Enable core services
-    for svc in devfs dmesg hwdrivers mdev; do
+    for svc in devfs dmesg hwdrivers mdev sysfs; do
         mkdir -p "$_rootfs/etc/runlevels/sysinit"
         ln -sf "/etc/init.d/$svc" "$_rootfs/etc/runlevels/sysinit/$svc"
     done
 
-    for svc in modules sysctl hostname bootmisc syslog; do
+    for svc in modules sysctl hostname bootmisc syslog cgroups; do
         mkdir -p "$_rootfs/etc/runlevels/boot"
         ln -sf "/etc/init.d/$svc" "$_rootfs/etc/runlevels/boot/$svc"
     done

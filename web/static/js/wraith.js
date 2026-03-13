@@ -146,9 +146,18 @@ ${c.state==='running'?`<button class="btn btn-sm btn-secondary" data-cont-action
 
 window.dashAct=async function(a){
   const b=$(`#btn-${a}-stack`);if(b)b.disabled=true;
-  try{await api(`/compose/${a}`,{method:'POST'});toast(`Stack ${a} initiated`,'success');setTimeout(fetchDash,1500)}
-  catch(e){toast(`Failed: ${e.message}`,'error')}
+  // Show a temporary inline terminal for streaming output
+  let termBox=$('#dash-term-container');
+  if(!termBox){termBox=document.createElement('div');termBox.id='dash-term-container';termBox.style.cssText='margin-bottom:24px';
+    const grid=$('#stats-grid');if(grid)grid.parentNode.insertBefore(termBox,grid);else $('#main-content').prepend(termBox)}
+  const term=new WraithTerminal(termBox);
+  term.clear();term.writeLine(`Stack ${a}...`,'info');
+  toast(`Stack ${a} started`,'info');
+  const result=await term.connectSSE(`/api/compose/${a}`);
+  if(result.success){toast(`Stack ${a} completed`,'success')}
+  else{toast(`Stack ${a} failed: ${result.error||'unknown'}`,'error')}
   if(b)b.disabled=false;
+  setTimeout(fetchDash,1000);
 };
 
 window.contAct=async function(name,a){
@@ -362,9 +371,10 @@ window.compAct=async function(a){
     else if(a==='deploy'){
       await api('/compose/file',{method:'PUT',body:{content:ed.value}});
       if(_term){_term.clear();_term.writeLine('Deploying stack...','info')}
-      const ws=`${location.protocol==='https:'?'wss:':'ws:'}//${location.host}/api/compose/deploy/ws`;
-      try{_term.connectWS(ws)}catch{const r=await api('/compose/deploy',{method:'POST'});if(_term)_term.write(r.output||r||'Done')}
       toast('Deploy started','info');
+      const result=await _term.connectSSE('/api/compose/deploy');
+      if(result.success){toast('Deploy completed','success')}
+      else{toast('Deploy failed: '+(result.error||'unknown error'),'error')}
     }
   }catch(e){toast(`Error: ${e.message}`,'error');if(_term)_term.writeLine(`Error: ${e.message}`,'err')}
   if(btn)btn.disabled=false;
@@ -514,7 +524,10 @@ function pgSettings(){
 <button class="btn btn-secondary" onclick="exportCfg()">${ic.dl} Export Config Backup</button></div>
 <div class="settings-section card animate-up"><div class="card-header"><div class="section-title" style="border:none;margin:0;padding:0">System Logs</div>
 <button class="btn btn-sm btn-secondary" onclick="fetchLogs()">Refresh</button></div>
-<div class="log-viewer" id="log-viewer">Loading logs...</div></div></div>`;
+<div class="log-viewer" id="log-viewer">Loading logs...</div></div>
+<div class="settings-section card animate-up"><div class="section-title">Danger Zone</div>
+<p style="font-size:.85rem;color:var(--tx-d);margin-bottom:16px">Reboot the server. All running containers will be stopped and restarted on boot.</p>
+<button class="btn btn-danger" onclick="rebootServer()">Reboot Server</button></div></div>`;
   fetchSysInfo();fetchLogs();fetchSettingsDiskStatus();
 }
 
@@ -552,6 +565,15 @@ window.settingsRescanDisks=async function(){
     toast('Disk rescan complete','success');
     fetchSettingsDiskStatus();
   }catch(e){toast(`Rescan failed: ${e.message}`,'error')}
+};
+
+window.rebootServer=async function(){
+  if(!confirm('Reboot the server? All running containers will be stopped.'))return;
+  try{
+    await api('/system/reboot',{method:'POST'});
+    toast('Rebooting server...','success');
+    setTimeout(()=>{document.body.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#fff;background:#0a0a0a"><div style="text-align:center"><h2>Server is rebooting...</h2><p>This page will refresh automatically.</p></div></div>';const check=setInterval(async()=>{try{await fetch('/api/system/info');clearInterval(check);location.reload()}catch{}},3000)},1000);
+  }catch(e){toast(`Reboot failed: ${e.message}`,'error')}
 };
 
 window.chgPw=async function(){

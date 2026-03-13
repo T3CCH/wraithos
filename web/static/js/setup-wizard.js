@@ -182,11 +182,17 @@ function renderStepDisks(body,footer){
   const s=wizState.status;
   const disks=s.availableDisks||[];
 
-  // Auto-detect WRAITH-labeled disks
+  // Auto-assign disks by size: smallest -> config, largest -> cache.
+  // Always prefer size-based assignment over label-based, because labels
+  // from a previous setup may be swapped (e.g. user reformatted wrong).
   if(Object.keys(wizState.assignments).length===0){
-    for(const d of disks){
-      if(d.label==='WRAITH-CONFIG')wizState.assignments[d.device]='config';
-      else if(d.label==='WRAITH-CACHE')wizState.assignments[d.device]='cache';
+    if(disks.length>=2){
+      const sorted=[...disks].sort((a,b)=>a.sizeBytes-b.sizeBytes);
+      wizState.assignments[sorted[0].device]='config';
+      wizState.assignments[sorted[sorted.length-1].device]='cache';
+    }else if(disks.length===1){
+      // Single disk: default to config (more critical for persistence)
+      wizState.assignments[disks[0].device]='config';
     }
   }
 

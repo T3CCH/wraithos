@@ -5,8 +5,14 @@ import "path/filepath"
 
 // Default paths matching the OS boot scripts (see os/rootfs/etc/conf.d/wraith).
 var (
-	// ConfigBase is the mount point for the persistent config disk.
+	// ConfigBase is the mount point for the live config (tmpfs in RAM).
+	// All Go code reads/writes here. Changes are synced back to the
+	// physical config disk at ConfigDiskDir.
 	ConfigBase = "/wraith/config"
+
+	// ConfigDiskDir is the mount point for the physical config disk.
+	// Used only for sync-back; the Go app does not read/write here directly.
+	ConfigDiskDir = "/wraith/config-disk"
 
 	// CacheDisk is the mount point for the Docker cache / volumes disk.
 	CacheDisk = "/wraith/cache"

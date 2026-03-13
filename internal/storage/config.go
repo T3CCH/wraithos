@@ -40,6 +40,9 @@ func WriteJSON(path string, src interface{}) error {
 		return fmt.Errorf("rename temp file: %w", err)
 	}
 
+	// Sync to physical config disk if this file is under ConfigBase
+	SyncConfigFile(path)
+
 	return nil
 }
 
@@ -64,6 +67,9 @@ func WriteFile(path string, data []byte) error {
 		os.Remove(tmp)
 		return fmt.Errorf("rename temp file: %w", err)
 	}
+
+	// Sync to physical config disk if this file is under ConfigBase
+	SyncConfigFile(path)
 
 	return nil
 }
