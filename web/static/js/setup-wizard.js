@@ -9,7 +9,19 @@
 
 const $=(s,p)=>(p||document).querySelector(s);
 const $$=(s,p)=>[...(p||document).querySelectorAll(s)];
-const {api,toast,fB,fU}=window._w||{};
+
+// Lazy-access shared utils from wraith.js via window._w.
+// Wrappers resolve at call time (not IIFE time) so the reference is
+// always live, even if this script executes before wraith.js finishes.
+function api(path,opts){
+  const fn=window._w&&window._w.api;
+  if(!fn)return Promise.reject(new Error('API not available'));
+  return fn(path,opts);
+}
+function toast(msg,type){
+  const fn=window._w&&window._w.toast;
+  if(fn)fn(msg,type);
+}
 
 // Wizard state
 let wizState={

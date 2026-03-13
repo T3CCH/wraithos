@@ -159,30 +159,94 @@ window.contAct=async function(name,a){
 
 // ============ COMPOSE EDITOR ============
 function pgCompose(){
-  $('#main-content').innerHTML=`<div class="editor-layout">
-<div id="compose-hint-banner"></div>
-<div class="editor-toolbar"><div class="editor-toolbar-group"><h1 class="page-title" style="font-size:1.1rem">Compose Editor</h1></div>
-<div class="editor-toolbar-group">
+  $('#main-content').innerHTML=`<div class="compose-page">
+<div class="compose-header">
+<div class="compose-header-left">
+<h1 class="page-title" style="font-size:1.2rem">Compose Editor</h1>
+<div id="yaml-status" class="yaml-status hidden"></div>
+</div>
+<div class="compose-header-right">
+<div class="compose-kbd-hints">
+<span class="kbd-hint"><kbd>Ctrl</kbd>+<kbd>S</kbd> Save</span>
+<span class="kbd-hint"><kbd>Tab</kbd> Indent</span>
+</div>
 <button class="btn btn-sm btn-secondary" onclick="compAct('validate')" id="btn-validate">${ic.check} Validate</button>
 <button class="btn btn-sm btn-secondary" onclick="compAct('save')" id="btn-save">${ic.save} Save</button>
 <button class="btn btn-sm btn-primary" onclick="compAct('deploy')" id="btn-deploy">${ic.send} Deploy</button>
-</div></div>
-<div class="editor-container"><textarea id="compose-editor" class="compose-textarea" spellcheck="false" placeholder="Loading docker-compose.yml..."></textarea></div>
-<div id="yaml-status" class="yaml-status hidden"></div>
-<div id="terminal-container"></div></div>`;
+</div>
+</div>
+<div class="compose-body">
+<div class="compose-editor-col">
+<div id="compose-hint-banner"></div>
+<div class="editor-container"><div class="editor-wrap"><div class="line-numbers" id="line-numbers" aria-hidden="true"></div><textarea id="compose-editor" class="compose-textarea" spellcheck="false" placeholder="Loading docker-compose.yml..."></textarea></div></div>
+<div id="terminal-container"></div>
+</div>
+<aside class="compose-sidebar" id="compose-sidebar">
+<div class="compose-sidebar-toggle" onclick="toggleComposeSidebar()">
+<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 3H3v18h18V3z"/><path d="M15 3v18"/></svg>
+<span>Paths</span>
+</div>
+<div class="compose-sidebar-inner" id="compose-sidebar-inner">
+<div class="sidebar-section">
+<h3 class="sidebar-section-title">
+<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
+Storage Paths
+</h3>
+<div class="path-cards" id="path-cards-storage">
+<div class="path-card">
+<div class="path-card-header"><code class="path-code">/wraith/cache</code><span class="path-badge" id="badge-cache">checking</span></div>
+<p class="path-desc">Docker volumes and container data. Use for databases, app state, and anything that should persist across container restarts.</p>
+<div class="path-example"><span class="path-example-label">Volume example</span>
+<pre class="path-snippet">volumes:\n  - /wraith/cache/myapp:/data</pre>
+<button class="btn-copy" onclick="copySnippet(this)" title="Copy"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>
+</div>
+</div>
+<div class="path-card">
+<div class="path-card-header"><code class="path-code">/wraith/config</code><span class="path-badge badge-system">system</span></div>
+<p class="path-desc">WraithOS configuration. Compose files, auth, and network settings live here. Avoid mounting directly into containers.</p>
+</div>
+</div>
+</div>
+<div class="sidebar-section">
+<h3 class="sidebar-section-title">
+<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
+Network Mounts
+</h3>
+<div id="path-cards-mounts" class="path-cards"><div class="skeleton skeleton-text" style="width:80%"></div><div class="skeleton skeleton-text" style="width:60%"></div></div>
+</div>
+<div class="sidebar-section">
+<h3 class="sidebar-section-title">
+<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+Tips
+</h3>
+<ul class="sidebar-tips">
+<li>WraithOS boots from RAM. Only <code>/wraith/cache</code> and <code>/mnt/*</code> survive reboots (when on persistent disks).</li>
+<li>Named Docker volumes are stored under <code>/wraith/cache</code> automatically.</li>
+<li>Use bind mounts for network storage: <code>/mnt/&lt;name&gt;:/container/path</code></li>
+<li>Set <code>restart: unless-stopped</code> so containers come back after reboot.</li>
+</ul>
+</div>
+</div>
+</aside>
+</div>
+</div>`;
   _term=new WraithTerminal($('#terminal-container'));
   loadCompose();
   loadComposeHint();
+  loadComposeSidebar();
   const ta=$('#compose-editor');
   ta.addEventListener('keydown',e=>{
-    if(e.key==='Tab'){e.preventDefault();const s=ta.selectionStart,en=ta.selectionEnd;ta.value=ta.value.substring(0,s)+'  '+ta.value.substring(en);ta.selectionStart=ta.selectionEnd=s+2}
+    if(e.key==='Tab'){e.preventDefault();const s=ta.selectionStart,en=ta.selectionEnd;ta.value=ta.value.substring(0,s)+'  '+ta.value.substring(en);ta.selectionStart=ta.selectionEnd=s+2;updateLineNumbers()}
     if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();compAct('save')}
   });
-  // Client-side YAML validation (debounced)
   ta.addEventListener('input',function(){
+    updateLineNumbers();
     if(_yamlTimer)clearTimeout(_yamlTimer);
     _yamlTimer=setTimeout(()=>validateYAMLClient(ta.value),500);
   });
+  ta.addEventListener('scroll',syncLineScroll);
+  // Initial line numbers once content loads
+  setTimeout(updateLineNumbers,200);
 }
 
 async function loadComposeHint(){
@@ -192,21 +256,77 @@ async function loadComposeHint(){
     const banner=$('#compose-hint-banner');
     if(!banner)return;
     const cachePersist=s.cacheDisk&&s.cacheDisk.persistent;
-    if(cachePersist){
-      banner.innerHTML=`<div class="compose-hint-banner hint-info">
-<span>Cache disk at <code>/wraith/cache</code> for Docker volumes. Network mounts at <code>/mnt/</code>.</span>
-<button class="btn-icon compose-hint-dismiss" onclick="this.closest('.compose-hint-banner').remove()" title="Dismiss" aria-label="Dismiss hint">
-<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-</button></div>`;
-    }else if(s.cacheDisk&&!s.cacheDisk.persistent){
+    // Update sidebar badge for cache disk
+    const cacheBadge=$('#badge-cache');
+    if(cacheBadge){
+      if(cachePersist){cacheBadge.textContent='persistent';cacheBadge.className='path-badge badge-ok'}
+      else{cacheBadge.textContent='tmpfs';cacheBadge.className='path-badge badge-warn'}
+    }
+    if(!cachePersist&&s.cacheDisk){
       banner.innerHTML=`<div class="compose-hint-banner hint-warn">
-<span>Cache disk is on temporary storage. Volumes will not persist across reboots.</span>
+<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+<span>Cache disk is on temporary storage. Volumes will <strong>not</strong> persist across reboots. <a href="#" onclick="event.preventDefault();setupWizard.show()">Set up disks</a></span>
 <button class="btn-icon compose-hint-dismiss" onclick="this.closest('.compose-hint-banner').remove()" title="Dismiss" aria-label="Dismiss hint">
 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
 </button></div>`;
     }
   }catch{}
 }
+
+async function loadComposeSidebar(){
+  try{
+    const d=await api('/mounts'),ms=d.mounts||d||[];
+    const el=$('#path-cards-mounts');if(!el)return;
+    if(!ms.length){
+      el.innerHTML=`<div class="path-card path-card-empty">
+<p class="path-desc">No network mounts configured yet.</p>
+<button class="btn btn-sm btn-secondary" onclick="navigate('mounts')" style="margin-top:8px">${ic.plus} Add Mount</button>
+</div>`;return}
+    el.innerHTML=ms.map(m=>{
+      const mp=esc(m.mountpoint||m.path);
+      const src=m.type==='nfs'?`${esc(m.server)}:${esc(m.share)}`:`//${esc(m.server)}/${esc(m.share)}`;
+      const mounted=m.mounted;
+      return`<div class="path-card">
+<div class="path-card-header"><code class="path-code">${mp}</code><span class="path-badge ${mounted?'badge-ok':'badge-warn'}">${mounted?'mounted':'unmounted'}</span></div>
+<p class="path-desc dim">${(m.type||'cifs').toUpperCase()} from ${src}</p>
+<div class="path-example"><span class="path-example-label">Bind mount</span>
+<pre class="path-snippet">volumes:\n  - ${mp}:/container/path</pre>
+<button class="btn-copy" onclick="copySnippet(this)" title="Copy"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>
+</div></div>`}).join('');
+  }catch{
+    const el=$('#path-cards-mounts');if(el)el.innerHTML='<p class="dim" style="font-size:.82rem">Could not load mounts.</p>';
+  }
+}
+
+function updateLineNumbers(){
+  const ta=$('#compose-editor'),ln=$('#line-numbers');
+  if(!ta||!ln)return;
+  const lines=ta.value.split('\n').length;
+  let h='';for(let i=1;i<=lines;i++)h+=i+'\n';
+  ln.textContent=h;
+  syncLineScroll();
+}
+
+function syncLineScroll(){
+  const ta=$('#compose-editor'),ln=$('#line-numbers');
+  if(ta&&ln)ln.scrollTop=ta.scrollTop;
+}
+
+window.toggleComposeSidebar=function(){
+  const sb=$('#compose-sidebar');
+  if(sb)sb.classList.toggle('collapsed');
+};
+
+window.copySnippet=function(btn){
+  const pre=btn.closest('.path-example').querySelector('.path-snippet');
+  if(!pre)return;
+  const text=pre.textContent.replace(/\\n/g,'\n');
+  navigator.clipboard.writeText(text).then(()=>{
+    btn.classList.add('copied');
+    setTimeout(()=>btn.classList.remove('copied'),1200);
+    toast('Copied to clipboard','success');
+  }).catch(()=>toast('Copy failed','error'));
+};
 
 function validateYAMLClient(content){
   const el=$('#yaml-status');

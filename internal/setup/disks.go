@@ -143,6 +143,11 @@ func shouldSkipDevice(dev lsblkDevice) bool {
 		return true
 	}
 
+	// Skip zram devices (RAM-based compressed block devices used for swap)
+	if strings.HasPrefix(dev.Name, "zram") {
+		return true
+	}
+
 	// Skip CD-ROM / ISO
 	if dev.Name == "sr0" || dev.Type == "rom" {
 		return true
@@ -277,10 +282,10 @@ func ValidateDevice(device string) error {
 		return fmt.Errorf("device path %q resolves outside /dev: %s", device, resolved)
 	}
 
-	// Refuse boot media
+	// Refuse boot media and virtual devices
 	base := filepath.Base(device)
-	if base == "sr0" || strings.HasPrefix(base, "loop") {
-		return fmt.Errorf("refusing to operate on boot media: %s", device)
+	if base == "sr0" || strings.HasPrefix(base, "loop") || strings.HasPrefix(base, "zram") {
+		return fmt.Errorf("refusing to operate on virtual device: %s", device)
 	}
 
 	return nil
