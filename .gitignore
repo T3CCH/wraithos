@@ -1,5 +1,5 @@
 # Go build output
-wraith-ui
+/wraith-ui
 *.exe
 *.dll
 *.so
