@@ -34,5 +34,9 @@ cover.html
 *.key
 *.crt
 
+# Project planning
+/docs/PRD*.md
+/docs/prd-*.md
+
 # OS files
 Thumbs.db

@@ -1,0 +1,55 @@
+#!/sbin/openrc-run
+# wraith-ui - Start the WraithOS web management UI
+#
+# Runs the Go web UI binary on the configured port (default 82).
+# The UI provides container management, network config, and Samba controls.
+
+description="WraithOS web management UI"
+
+# Load configuration
+. /etc/conf.d/wraith
+
+command="$WRAITH_UI_BINARY"
+command_args="--port $WRAITH_UI_PORT --config-dir $WRAITH_CONFIG_DIR --cache-dir $WRAITH_CACHE_DIR --config-disk-dir $WRAITH_CONFIG_DISK_DIR"
+command_background=true
+pidfile="/var/run/wraith-ui.pid"
+output_log="/var/log/wraith-ui.log"
+error_log="/var/log/wraith-ui.log"
+
+depend() {
+    need wraith-disks wraith-network
+    after wraith-docker wraith-samba
+}
+
+start_pre() {
+    # Verify the binary exists
+    if [ ! -x "$WRAITH_UI_BINARY" ]; then
+        eerror "Web UI binary not found: $WRAITH_UI_BINARY"
+        return 1
+    fi
+
+    # Ensure log directory exists
+    mkdir -p /var/log
+
+    einfo "Starting web UI on port $WRAITH_UI_PORT"
+}
+
+start_post() {
+    # Brief wait then verify the process is still running
+    sleep 1
+    if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+        einfo "Web UI started (PID: $(cat "$pidfile"))"
+    else
+        ewarn "Web UI may have failed to start -- check $error_log"
+    fi
+}
+
+status() {
+    if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+        einfo "Web UI: running on port $WRAITH_UI_PORT (PID: $(cat "$pidfile"))"
+        return 0
+    else
+        eerror "Web UI: not running"
+        return 1
+    fi
+}
