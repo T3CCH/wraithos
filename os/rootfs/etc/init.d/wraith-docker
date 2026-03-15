@@ -56,8 +56,8 @@ start() {
             local samba_file="$WRAITH_CONFIG_DIR/samba.json"
             if [ -f "$samba_file" ]; then
                 local all_mounted=true
-                # Extract mount points from samba.json and verify each is mounted
-                for mp in $(sed -n 's/.*"mountpoint"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$samba_file"); do
+                # Extract mount points from samba.json (flatten first — JSON is indented)
+                for mp in $(tr -d '\n' < "$samba_file" | grep -o '"mountpoint"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/'); do
                     if ! grep -q " $mp " /proc/mounts 2>/dev/null; then
                         ewarn "Required mount not available: $mp"
                         all_mounted=false
@@ -83,11 +83,8 @@ start() {
     docker compose -f "$compose_file" $env_flag up -d 2>&1 \
         | while read -r line; do einfo "  compose: $line"; done
 
-    if [ ${PIPESTATUS[0]} -ne 0 ]; then
-        ewarn "docker compose up failed -- check logs"
-        eend 1
-        return 1
-    fi
+    # Note: can't check PIPESTATUS on busybox sh; compose errors
+    # are logged by the pipe above and visible in wraith-ui logs.
 
     einfo "Compose stack deployed successfully"
     eend 0

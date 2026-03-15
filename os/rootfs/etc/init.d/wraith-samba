@@ -27,10 +27,12 @@ parse_and_mount() {
     [ -f "$config_file" ] || return 0
 
     # Extract individual mount objects (one per line)
-    # This uses a simple approach: split on },{ to get individual entries
+    # First flatten the JSON (WriteJSON uses MarshalIndent with newlines),
+    # then extract the mounts array, then split entries on },{
     local mounts_json
-    mounts_json=$(sed 's/.*"mounts":\[//;s/\].*//' "$config_file" \
-        | sed 's/},{/}\n{/g')
+    mounts_json=$(tr -d '\n' < "$config_file" \
+        | sed 's/.*"mounts":\[//;s/\].*//' \
+        | sed 's/},{/}|{/g' | tr '|' '\n')
 
     [ -z "$mounts_json" ] && return 0
 
