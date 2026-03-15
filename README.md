@@ -243,6 +243,58 @@ Check the [Issues](https://github.com/T3CCH/wraithos/issues) on GitHub if you en
 3. Verify your network connection and disk space
 4. Include your Compose file (without secrets) and any error messages in your issue report
 
+## Building from Source
+
+Want to build WraithOS yourself? Here's how.
+
+### Prerequisites
+
+- **Go 1.24+** (or Docker, if you prefer a containerized build)
+- **Docker** (for the ISO builder)
+- **QEMU** (optional, for local testing)
+
+### Build the ISO
+
+```bash
+make build-iso
+```
+
+This will:
+1. Compile the `wraith-ui` Go binary (static, no CGO)
+2. Run the Alpine-based ISO builder to produce a bootable image
+
+The finished ISO lands in `os/build/`.
+
+### Containerized Build (no local Go required)
+
+If you don't have Go installed, build the binary with Docker first:
+
+```bash
+docker run --rm -v "$(pwd)":/build -w /build golang:1.24-alpine sh -c \
+  "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags='-s -w' -o wraith-ui ./cmd/wraith-ui"
+```
+
+Then build the ISO:
+
+```bash
+bash os/scripts/build-iso.sh
+```
+
+### Test in QEMU
+
+```bash
+make test-qemu
+```
+
+### Other Targets
+
+| Command | Description |
+|---------|-------------|
+| `make build-ui` | Build just the Go binary |
+| `make lint` | Lint shell scripts with shellcheck |
+| `make upload XCP_HOST=<host>` | Upload ISO to an XCP-ng hypervisor |
+| `make clean` | Remove build artifacts |
+
 ## License
 
 WraithOS is open source under the MIT License. See LICENSE file for details.
