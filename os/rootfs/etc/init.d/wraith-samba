@@ -17,7 +17,8 @@ depend() {
 
 # Parse simple JSON arrays using sed/grep.
 # This handles the samba.json format:
-# {"mounts":[{"name":"x","server":"y","share":"z","username":"u","password":"p","options":"o"}]}
+# {"mounts":[{"mountpoint":"/mnt/x","server":"y","share":"z","username":"u","password":"p","options":"o"}]}
+# Also supports legacy format with "name" field instead of "mountpoint".
 #
 # For each mount entry, extracts fields and calls mount_share.
 parse_and_mount() {
@@ -37,8 +38,16 @@ parse_and_mount() {
         [ -z "$entry" ] && continue
 
         local name server share username password mount_opts mount_type
+        local mountpoint_val
 
-        name=$(echo "$entry"     | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+        # Extract mountpoint (new format) or name (legacy format)
+        mountpoint_val=$(echo "$entry" | sed -n 's/.*"mountpoint"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+        if [ -n "$mountpoint_val" ]; then
+            name=$(basename "$mountpoint_val")
+        else
+            # Legacy fallback: use "name" field directly
+            name=$(echo "$entry" | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+        fi
         server=$(echo "$entry"   | sed -n 's/.*"server"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
         share=$(echo "$entry"    | sed -n 's/.*"share"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
         username=$(echo "$entry" | sed -n 's/.*"username"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')

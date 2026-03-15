@@ -78,6 +78,10 @@ func main() {
 	// Initialize Samba manager
 	sambaMgr := system.NewSambaManager()
 
+	// Start SSH if it was enabled before reboot
+	system.StartSSHIfEnabled()
+	logCollector.Info("system", "SSH auto-start check complete")
+
 	// Prepare embedded static filesystem
 	// The embed.FS has paths like "web/static/index.html", so we strip the prefix.
 	staticFS, err := fs.Sub(wraithui.StaticFiles, "web/static")

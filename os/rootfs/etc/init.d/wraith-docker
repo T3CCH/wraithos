@@ -47,6 +47,31 @@ start() {
         return 1
     fi
 
+    # Check if requireMounts is enabled in compose settings
+    local settings_file="$compose_dir/settings.json"
+    if [ -f "$settings_file" ]; then
+        local require_mounts
+        require_mounts=$(sed -n 's/.*"requireMounts"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p' "$settings_file")
+        if [ "$require_mounts" = "true" ]; then
+            local samba_file="$WRAITH_CONFIG_DIR/samba.json"
+            if [ -f "$samba_file" ]; then
+                local all_mounted=true
+                # Extract mount points from samba.json and verify each is mounted
+                for mp in $(sed -n 's/.*"mountpoint"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$samba_file"); do
+                    if ! grep -q " $mp " /proc/mounts 2>/dev/null; then
+                        ewarn "Required mount not available: $mp"
+                        all_mounted=false
+                    fi
+                done
+                if [ "$all_mounted" = "false" ]; then
+                    ewarn "Require mounts is enabled but not all mounts are available -- skipping compose deploy"
+                    eend 1
+                    return 1
+                fi
+            fi
+        fi
+    fi
+
     einfo "Deploying docker-compose stack from config disk"
 
     local env_flag=""

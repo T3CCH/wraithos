@@ -20,7 +20,7 @@ function toast(msg,type='info'){
   setTimeout(()=>{el.classList.add('toast-exit');setTimeout(()=>el.remove(),200)},3500);
 }
 
-const pages=['dashboard','compose','mounts','network','settings'];
+const pages=['dashboard','compose','mounts','files','network','settings'];
 let cur='dashboard';
 
 function stopPoll(){if(_poll){clearInterval(_poll);_poll=null}}
@@ -32,7 +32,7 @@ window.navigate=function(p){
   $('#sidebar').classList.remove('open');stopPoll();
   if(p!=='compose'&&_term){_term.destroy();_term=null}
   const m=$('#main-content');m.style.opacity='0';
-  setTimeout(()=>{({dashboard:pgDash,compose:pgCompose,mounts:pgMounts,network:pgNetwork,settings:pgSettings}[p]||pgDash)();m.style.opacity='1'},80);
+  setTimeout(()=>{({dashboard:pgDash,compose:pgCompose,mounts:pgMounts,files:pgFiles,network:pgNetwork,settings:pgSettings}[p]||pgDash)();m.style.opacity='1'},80);
 };
 window.toggleSidebar=function(){$('#sidebar').classList.toggle('open')};
 window.logout=async function(){try{await api('/auth/logout',{method:'POST'})}catch{}location.href='/login.html'};
@@ -62,6 +62,7 @@ const ic={
 function pgDash(){
   $('#main-content').innerHTML=`
 <div id="tmpfs-banner"></div>
+<div id="expand-banner"></div>
 <div class="page-header"><h1 class="page-title">Dashboard</h1>
 <div class="page-actions">
 <button class="btn btn-sm btn-secondary" onclick="dashAct('restart')" id="btn-restart-stack">${ic.restart} Restart Stack</button>
@@ -75,6 +76,7 @@ function pgDash(){
 <div class="container-grid stagger" id="container-grid">${skel(3)}</div>`;
   startPoll(fetchDash,5000);
   checkDiskStatus();
+  checkExpandableDisks();
 }
 
 async function fetchDash(){
@@ -103,6 +105,36 @@ async function checkDiskStatus(){
       banner.innerHTML='';
     }
   }catch{}
+}
+
+async function checkExpandableDisks(){
+  try{
+    const r=await api('/system/disks/expandable');
+    const banner=$('#expand-banner');
+    if(!banner)return;
+    const disks=r.disks||[];
+    if(disks.length===0){banner.innerHTML='';return}
+    banner.innerHTML=disks.map(d=>{
+      const role=d.role==='single'?'Disk':d.role==='config'?'Config Disk':'Cache Disk';
+      return `<div class="expand-banner animate-in" style="background:var(--ac-glow);border:1px solid var(--ac-dim);border-radius:var(--r-md);padding:12px 16px;margin-bottom:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+<span style="font-size:1.2rem">&#9889;</span>
+<span style="flex:1">${esc(role)} (${esc(d.device)}) has <strong>${fB(d.growBytes)}</strong> unused space available</span>
+<button class="btn btn-sm btn-primary" onclick="expandDisk('${esc(d.device)}')">Expand Filesystem</button>
+</div>`}).join('');
+  }catch{}
+}
+
+async function expandDisk(device){
+  if(!confirm('Expand the filesystem on '+device+'? This will grow the filesystem to use all available space on the device.'))return;
+  try{
+    await api('/system/disks/expand',{method:'POST',body:{device}});
+    toast('Filesystem expanded successfully','success');
+    checkExpandableDisks();
+    // Refresh dashboard stats to show new disk size
+    fetchDash();
+  }catch(e){
+    toast('Expand failed: '+e.message,'error');
+  }
 }
 
 function updStats(s){
@@ -188,6 +220,11 @@ function pgCompose(){
 <div class="compose-body">
 <div class="compose-editor-col">
 <div id="compose-hint-banner"></div>
+<div class="compose-settings-bar" id="compose-settings-bar">
+<div class="toggle-wrap"><label class="toggle"><input type="checkbox" id="require-mounts-toggle" onchange="toggleRequireMounts(this.checked)"><span class="toggle-track"></span><span class="toggle-thumb"></span></label>
+<div style="display:flex;flex-direction:column;gap:2px"><span class="toggle-label" style="font-size:.85rem">Require network mounts before deploy</span>
+<span style="font-size:.75rem;color:var(--tx-m)">When enabled, containers won't start unless all configured mounts are available</span></div></div>
+</div>
 <div class="editor-container"><div class="editor-wrap"><div class="line-numbers" id="line-numbers" aria-hidden="true"></div><textarea id="compose-editor" class="compose-textarea" spellcheck="false" placeholder="Loading docker-compose.yml..."></textarea></div></div>
 <div id="terminal-container"></div>
 </div>
@@ -244,6 +281,7 @@ Tips
   loadCompose();
   loadComposeHint();
   loadComposeSidebar();
+  loadComposeSettings();
   const ta=$('#compose-editor');
   ta.addEventListener('keydown',e=>{
     if(e.key==='Tab'){e.preventDefault();const s=ta.selectionStart,en=ta.selectionEnd;ta.value=ta.value.substring(0,s)+'  '+ta.value.substring(en);ta.selectionStart=ta.selectionEnd=s+2;updateLineNumbers()}
@@ -362,6 +400,25 @@ async function loadCompose(){
   catch(x){const e=$('#compose-editor');if(e)e.placeholder='No compose file found. Paste your docker-compose.yml here.'}
 }
 
+async function loadComposeSettings(){
+  try{
+    const d=await api('/compose/settings');
+    const cb=$('#require-mounts-toggle');
+    if(cb)cb.checked=!!d.requireMounts;
+  }catch{}
+}
+
+window.toggleRequireMounts=async function(enabled){
+  const cb=$('#require-mounts-toggle');
+  try{
+    await api('/compose/settings',{method:'PUT',body:{requireMounts:enabled}});
+    toast(enabled?'Mounts required before deploy':'Mount requirement disabled','success');
+  }catch(e){
+    toast('Failed to update setting: '+e.message,'error');
+    if(cb)cb.checked=!enabled;
+  }
+};
+
 window.compAct=async function(a){
   const btn=$(`#btn-${a}`),ed=$('#compose-editor');if(!ed)return;if(btn)btn.disabled=true;
   try{
@@ -373,7 +430,10 @@ window.compAct=async function(a){
       await api('/compose/file',{method:'PUT',body:{content:ed.value}});
       if(_term)_term.clear();
       toast('Deploy started','info');
-      await runDeployWithProgress();
+      const result=await runDeployWithProgress();
+      if(result&&!result.success&&result.error&&result.error.includes('mount')){
+        if(_term)_term.writeLine('Go to Network Mounts to mount your shares, or disable "Require Mounts" above.','warn');
+      }
     }
   }catch(e){toast(`Error: ${e.message}`,'error');if(_term)_term.writeLine(`Error: ${e.message}`,'err')}
   if(btn)btn.disabled=false;
@@ -553,9 +613,9 @@ function pgMounts(){
 <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="radio" name="mnt-type" value="cifs" checked onchange="mntTypeChanged()"> SMB/CIFS</label>
 <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="radio" name="mnt-type" value="nfs" onchange="mntTypeChanged()"> NFS</label>
 </div></div>
-<div class="form-group"><label class="form-label">Server</label><input class="form-input" id="mnt-server" placeholder="192.168.1.100"></div>
-<div class="form-group"><label class="form-label" id="mnt-share-label">Share</label><input class="form-input" id="mnt-share" placeholder="shared_folder"></div>
-<div class="form-group"><label class="form-label">Mount Name</label><input class="form-input" id="mnt-name" placeholder="media" oninput="mntNameChanged()">
+<div class="form-group"><label class="form-label">Server</label><input class="form-input" id="mnt-server" placeholder="MYSERVER or 192.168.1.100"><div class="form-hint">Hostname or IP of the file server</div></div>
+<div class="form-group"><label class="form-label" id="mnt-share-label">Share</label><input class="form-input" id="mnt-share" placeholder="folder/path"><div class="form-hint" id="mnt-share-hint">Path relative to the share root</div></div>
+<div class="form-group"><label class="form-label">Mount Name</label><input class="form-input" id="mnt-name" placeholder="my-share" oninput="mntNameChanged()">
 <div class="form-hint" id="mnt-path-hint">Mounts at /mnt/&lt;name&gt;</div></div>
 <div id="mnt-creds-group">
 <div class="form-group"><label class="form-label">Username</label><input class="form-input" id="mnt-user" placeholder="optional"></div>
@@ -593,15 +653,18 @@ window.mntTypeChanged=function(){
   const shareLabel=$('#mnt-share-label');
   const shareInput=$('#mnt-share');
   const optsHint=$('#mnt-opts-hint');
+  const shareHint=$('#mnt-share-hint');
   if(t==='nfs'){
     if(creds)creds.style.display='none';
     if(shareLabel)shareLabel.textContent='Export Path';
     if(shareInput)shareInput.placeholder='/data/exports';
+    if(shareHint)shareHint.textContent='Absolute path on the NFS server';
     if(optsHint)optsHint.textContent='Default: noatime,nfsvers=4';
   }else{
     if(creds)creds.style.display='';
     if(shareLabel)shareLabel.textContent='Share';
-    if(shareInput)shareInput.placeholder='shared_folder';
+    if(shareInput)shareInput.placeholder='folder/path';
+    if(shareHint)shareHint.textContent='Path relative to the share root';
     if(optsHint)optsHint.textContent='Additional mount options';
   }
 };
@@ -664,6 +727,279 @@ window.saveNet=async function(){
   catch(e){toast(`Error: ${e.message}`,'error')}
 };
 
+// ============ FILE MANAGER ============
+let _fileCurPath='',_fileRoots=[],_fileSelection=new Set();
+
+function fileIcon(name,isDir){
+  if(isDir)return '<span class="fi fi-dir">&#128193;</span>';
+  const ext=(name.split('.').pop()||'').toLowerCase();
+  if(['mp4','mkv','avi','mov','wmv','flv','webm'].includes(ext))return '<span class="fi fi-video">&#127916;</span>';
+  if(['mp3','flac','wav','aac','ogg','wma','m4a'].includes(ext))return '<span class="fi fi-audio">&#127925;</span>';
+  if(['jpg','jpeg','png','gif','bmp','svg','webp','ico','tiff'].includes(ext))return '<span class="fi fi-image">&#128444;</span>';
+  if(['zip','tar','gz','bz2','xz','rar','7z','tgz'].includes(ext))return '<span class="fi fi-archive">&#128230;</span>';
+  if(['pdf'].includes(ext))return '<span class="fi fi-pdf">&#128196;</span>';
+  if(['txt','md','log','csv','json','xml','yml','yaml','conf','cfg','ini'].includes(ext))return '<span class="fi fi-text">&#128196;</span>';
+  return '<span class="fi fi-file">&#128196;</span>';
+}
+
+function fileBreadcrumb(path){
+  if(!path)return '';
+  // Find which root this path belongs to
+  const root=_fileRoots.find(r=>path===r.path||path.startsWith(r.path+'/'));
+  if(!root)return esc(path);
+  const rel=path===root.path?'':path.slice(root.path.length+1);
+  let html=`<span class="fb-crumb fb-root" onclick="fileBrowse('${esc(root.path)}')">${esc(root.name)}</span>`;
+  if(rel){
+    const parts=rel.split('/');
+    let built=root.path;
+    for(const p of parts){
+      built+='/'+p;
+      const bp=built;
+      html+=`<span class="fb-sep">/</span><span class="fb-crumb" onclick="fileBrowse('${esc(bp)}')">${esc(p)}</span>`;
+    }
+  }
+  return html;
+}
+
+function pgFiles(){
+  _fileSelection.clear();
+  $('#main-content').innerHTML=`<div class="page-header"><h1 class="page-title">File Manager</h1>
+<div class="page-actions">
+<button class="btn btn-sm btn-secondary" onclick="fileNewFolder()">${ic.plus} New Folder</button>
+<label class="btn btn-sm btn-primary" style="cursor:pointer">${ic.ul} Upload<input type="file" multiple style="display:none" onchange="fileUploadInput(this)"></label>
+</div></div>
+<div class="fb-toolbar">
+<div class="fb-roots" id="fb-roots"><div class="skeleton skeleton-text"></div></div>
+<div class="fb-breadcrumb" id="fb-breadcrumb"></div>
+</div>
+<div class="fb-drop-zone" id="fb-drop-zone">
+<div class="fb-drop-overlay hidden" id="fb-drop-overlay"><div class="fb-drop-label">${ic.ul} Drop files here to upload</div></div>
+<div class="fb-upload-progress hidden" id="fb-upload-progress"><div class="fb-progress-bar" id="fb-progress-bar"></div><span class="fb-progress-text" id="fb-progress-text"></span></div>
+<table class="fb-table" id="fb-table"><thead><tr>
+<th class="fb-th-check"><input type="checkbox" id="fb-select-all" onchange="fileSelectAll(this.checked)"></th>
+<th class="fb-th-name" onclick="fileSortBy('name')">Name</th>
+<th class="fb-th-size" onclick="fileSortBy('size')">Size</th>
+<th class="fb-th-date" onclick="fileSortBy('modified')">Modified</th>
+<th class="fb-th-actions">Actions</th>
+</tr></thead><tbody id="fb-body"><tr><td colspan="5">${skel(3)}</td></tr></tbody></table>
+</div>`;
+  fileLoadRoots();
+  fileInitDragDrop();
+}
+
+async function fileLoadRoots(){
+  try{
+    const d=await api('/files/roots');
+    _fileRoots=d.roots||[];
+    const el=$('#fb-roots');
+    if(!_fileRoots.length){
+      el.innerHTML='<div class="fb-no-roots">No mounted shares or volumes found. <a href="#" onclick="event.preventDefault();navigate(\'mounts\')">Add a mount</a> first.</div>';
+      $('#fb-body').innerHTML='<tr><td colspan="5" class="fb-empty">No locations available to browse</td></tr>';
+      return;
+    }
+    el.innerHTML=_fileRoots.map(r=>`<button class="btn btn-sm fb-root-btn" onclick="fileBrowse('${esc(r.path)}')" title="${esc(r.path)}">
+<span class="fb-root-type fb-type-${esc(r.type)}">${r.type==='local'?'LOCAL':r.type==='volumes'?'VOL':r.type==='nfs'?'NFS':'SMB'}</span>
+${esc(r.name)}</button>`).join('');
+    // Auto-browse first root
+    fileBrowse(_fileRoots[0].path);
+  }catch(e){toast('Failed to load file roots: '+e.message,'error')}
+}
+
+async function fileBrowse(path,sortBy){
+  _fileCurPath=path;
+  _fileSelection.clear();
+  const chk=$('#fb-select-all');if(chk)chk.checked=false;
+  $('#fb-breadcrumb').innerHTML=fileBreadcrumb(path);
+  $('#fb-body').innerHTML=`<tr><td colspan="5">${skel(3)}</td></tr>`;
+  // Highlight active root button
+  $$('.fb-root-btn').forEach(btn=>{
+    const btnPath=btn.getAttribute('title');
+    btn.classList.toggle('fb-root-active',path===btnPath||path.startsWith(btnPath+'/'));
+  });
+  try{
+    const q=new URLSearchParams({path});
+    if(sortBy)q.set('sort',sortBy);
+    const d=await api('/files/list?'+q);
+    const files=d.files||[];
+    if(!files.length){
+      $('#fb-body').innerHTML='<tr><td colspan="5" class="fb-empty">Empty directory</td></tr>';
+      return;
+    }
+    $('#fb-body').innerHTML=files.map(f=>{
+      const fp=_fileCurPath+'/'+f.name;
+      const mod=f.modified?new Date(f.modified).toLocaleString():'-';
+      const size=f.isDir?'-':fB(f.size);
+      return`<tr class="fb-row" data-path="${esc(fp)}" data-name="${esc(f.name)}" data-isdir="${f.isDir}">
+<td class="fb-td-check"><input type="checkbox" onchange="fileToggleSelect('${esc(fp)}',this.checked)"></td>
+<td class="fb-td-name" onclick="${f.isDir?`fileBrowse('${esc(fp)}')`:`filePreviewOrDownload('${esc(fp)}','${esc(f.name)}')`}">
+${fileIcon(f.name,f.isDir)}<span class="fb-name">${esc(f.name)}</span></td>
+<td class="fb-td-size">${size}</td>
+<td class="fb-td-date">${mod}</td>
+<td class="fb-td-actions">
+<button class="btn-icon btn-sm" onclick="fileCopyPrompt('${esc(fp)}','${esc(f.name)}',${f.isDir})" title="Copy to..."><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>
+${f.isDir?'':`<button class="btn-icon btn-sm" onclick="fileDownload('${esc(fp)}')" title="Download">${ic.dl}</button>`}
+<button class="btn-icon btn-sm" onclick="fileRenamePrompt('${esc(fp)}','${esc(f.name)}')" title="Rename"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+<button class="btn-icon btn-sm" onclick="fileDeletePrompt('${esc(fp)}','${esc(f.name)}',${f.isDir})" title="Delete"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg></button>
+</td></tr>`}).join('');
+  }catch(e){
+    $('#fb-body').innerHTML=`<tr><td colspan="5" class="fb-empty fb-error">Error: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+window.fileBrowse=fileBrowse;
+
+function fileSortBy(field){fileBrowse(_fileCurPath,field)}
+window.fileSortBy=fileSortBy;
+
+function fileToggleSelect(path,checked){
+  if(checked)_fileSelection.add(path);else _fileSelection.delete(path);
+}
+window.fileToggleSelect=fileToggleSelect;
+
+function fileSelectAll(checked){
+  _fileSelection.clear();
+  $$('#fb-body input[type="checkbox"]').forEach(cb=>{
+    cb.checked=checked;
+    const row=cb.closest('tr');
+    if(row&&checked)_fileSelection.add(row.dataset.path);
+  });
+}
+window.fileSelectAll=fileSelectAll;
+
+function fileDownload(path){
+  const a=document.createElement('a');
+  a.href=`${API}/files/download?path=${encodeURIComponent(path)}`;
+  a.download='';a.click();
+}
+window.fileDownload=fileDownload;
+
+function filePreviewOrDownload(path,name){fileDownload(path)}
+window.filePreviewOrDownload=filePreviewOrDownload;
+
+async function fileNewFolder(){
+  if(!_fileCurPath){toast('Navigate to a directory first','error');return}
+  const name=prompt('New folder name:');
+  if(!name||!name.trim())return;
+  try{
+    await api('/files/mkdir',{method:'POST',body:{path:_fileCurPath+'/'+name.trim()}});
+    toast('Folder created','success');
+    fileBrowse(_fileCurPath);
+  }catch(e){toast('Failed to create folder: '+e.message,'error')}
+}
+window.fileNewFolder=fileNewFolder;
+
+async function fileDeletePrompt(path,name,isDir){
+  const what=isDir?'directory "'+name+'" and all its contents':'file "'+name+'"';
+  if(!confirm('Delete '+what+'? This cannot be undone.'))return;
+  try{
+    await api('/files/delete',{method:'POST',body:{path}});
+    toast('Deleted '+name,'success');
+    fileBrowse(_fileCurPath);
+  }catch(e){toast('Delete failed: '+e.message,'error')}
+}
+window.fileDeletePrompt=fileDeletePrompt;
+
+async function fileRenamePrompt(path,oldName){
+  const newName=prompt('Rename to:',oldName);
+  if(!newName||newName===oldName||!newName.trim())return;
+  try{
+    await api('/files/rename',{method:'POST',body:{path,newName:newName.trim()}});
+    toast('Renamed to '+newName.trim(),'success');
+    fileBrowse(_fileCurPath);
+  }catch(e){toast('Rename failed: '+e.message,'error')}
+}
+window.fileRenamePrompt=fileRenamePrompt;
+
+async function fileCopyPrompt(path,name,isDir){
+  if(!_fileRoots||!_fileRoots.length){toast('No destinations available','error');return}
+  // Build destination picker: show all roots except the one this file is already in
+  const srcRoot=_fileRoots.find(r=>path===r.path||path.startsWith(r.path+'/'));
+  const dests=_fileRoots.filter(r=>r!==srcRoot);
+  if(!dests.length){toast('No other locations to copy to. Add another mount or use Local Storage.','error');return}
+  let destPath;
+  if(dests.length===1){
+    destPath=dests[0].path;
+    if(!confirm(`Copy "${name}" to ${dests[0].name}?`))return;
+  }else{
+    const choices=dests.map((r,i)=>`${i+1}. ${r.name}`).join('\n');
+    const pick=prompt(`Copy "${name}" to:\n${choices}\n\nEnter number:`);
+    if(!pick)return;
+    const idx=parseInt(pick,10)-1;
+    if(isNaN(idx)||idx<0||idx>=dests.length){toast('Invalid selection','error');return}
+    destPath=dests[idx].path;
+  }
+  const dest=destPath+'/'+name;
+  try{
+    toast(`Copying ${name}...`,'info');
+    await api('/files/copy',{method:'POST',body:{source:path,destination:dest}});
+    toast(`Copied ${name}`,'success');
+  }catch(e){toast('Copy failed: '+e.message,'error')}
+}
+window.fileCopyPrompt=fileCopyPrompt;
+
+async function fileUploadFiles(files){
+  if(!files||!files.length)return;
+  if(!_fileCurPath){toast('Navigate to a directory first','error');return}
+  const prog=$('#fb-upload-progress');
+  const bar=$('#fb-progress-bar');
+  const txt=$('#fb-progress-text');
+  prog.classList.remove('hidden');
+  txt.textContent=`Uploading ${files.length} file(s)...`;
+  bar.style.width='0%';
+
+  const form=new FormData();
+  form.append('path',_fileCurPath);
+  for(const f of files)form.append('file',f);
+
+  try{
+    const xhr=new XMLHttpRequest();
+    xhr.upload.addEventListener('progress',e=>{
+      if(e.lengthComputable){
+        const pct=Math.round(e.loaded/e.total*100);
+        bar.style.width=pct+'%';
+        txt.textContent=`Uploading... ${pct}% (${fB(e.loaded)} / ${fB(e.total)})`;
+      }
+    });
+    await new Promise((resolve,reject)=>{
+      xhr.onload=()=>{
+        if(xhr.status>=200&&xhr.status<300){
+          const d=JSON.parse(xhr.responseText);
+          toast(`Uploaded ${d.uploaded} file(s)`,'success');
+          resolve();
+        }else{
+          try{const d=JSON.parse(xhr.responseText);reject(new Error(d.error||'Upload failed'))}
+          catch{reject(new Error('Upload failed: HTTP '+xhr.status))}
+        }
+      };
+      xhr.onerror=()=>reject(new Error('Upload failed: network error'));
+      xhr.open('POST',`${API}/files/upload`);
+      xhr.send(form);
+    });
+    fileBrowse(_fileCurPath);
+  }catch(e){toast('Upload failed: '+e.message,'error')}
+  finally{setTimeout(()=>prog.classList.add('hidden'),1500)}
+}
+
+function fileUploadInput(input){
+  if(input.files.length)fileUploadFiles(input.files);
+  input.value='';
+}
+window.fileUploadInput=fileUploadInput;
+
+function fileInitDragDrop(){
+  const zone=$('#fb-drop-zone');
+  const overlay=$('#fb-drop-overlay');
+  if(!zone||!overlay)return;
+  let dragCount=0;
+  zone.addEventListener('dragenter',e=>{e.preventDefault();dragCount++;overlay.classList.remove('hidden')});
+  zone.addEventListener('dragleave',e=>{e.preventDefault();dragCount--;if(dragCount<=0){dragCount=0;overlay.classList.add('hidden')}});
+  zone.addEventListener('dragover',e=>{e.preventDefault()});
+  zone.addEventListener('drop',e=>{
+    e.preventDefault();dragCount=0;overlay.classList.add('hidden');
+    if(e.dataTransfer.files.length)fileUploadFiles(e.dataTransfer.files);
+  });
+}
+
 // ============ SETTINGS ============
 function pgSettings(){
   $('#main-content').innerHTML=`<div class="page-header"><h1 class="page-title">System Settings</h1></div>
@@ -676,6 +1012,12 @@ function pgSettings(){
 <div class="form-group"><label class="form-label">New Password</label><input class="form-input" id="pw-new" type="password"></div>
 <div class="form-group"><label class="form-label">Confirm New Password</label><input class="form-input" id="pw-cfm" type="password"></div>
 </div><div class="form-actions"><button class="btn btn-primary" onclick="chgPw()">Update Password</button></div></div>
+<div class="settings-section card animate-up"><div class="section-title">SSH Access</div>
+<p style="font-size:.85rem;color:var(--tx-d);margin-bottom:16px">Enable or disable remote SSH access. SSH is disabled by default for security. This setting persists across reboots.</p>
+<div class="toggle-wrap"><label class="toggle" id="ssh-toggle">
+<input type="checkbox" id="ssh-enabled" onchange="toggleSSH(this.checked)"><span class="toggle-track"></span><span class="toggle-thumb"></span></label>
+<span class="toggle-label" id="ssh-label">SSH Disabled</span>
+<span id="ssh-status" style="margin-left:12px;font-size:.82rem;font-family:var(--mono)"></span></div></div>
 <div class="settings-section card animate-up" id="settings-disk-section"><div class="section-title">Disk Management</div>
 <div id="settings-disk-status">Loading disk status...</div>
 <div class="form-actions"><button class="btn btn-primary" onclick="setupWizard.show()">Set Up Disks</button>
@@ -710,7 +1052,7 @@ function pgSettings(){
 <div style="font-size:.82rem;color:var(--tx-d)">Reboot the server. All running containers will be stopped and restarted on boot.</div></div>
 <button class="btn btn-danger" onclick="rebootServer()">Reboot Server</button></div>
 </div></div></div>`;
-  fetchSysInfo();fetchLogs();fetchSettingsDiskStatus();
+  fetchSysInfo();fetchLogs();fetchSettingsDiskStatus();fetchSSHStatus();
 }
 
 async function fetchSysInfo(){
@@ -731,11 +1073,29 @@ async function fetchSettingsDiskStatus(){
     const el=$('#settings-disk-status');if(!el)return;
     const cfg=s.configDisk||{};
     const cache=s.cacheDisk||{};
-    el.innerHTML=`<dl class="info-grid" style="margin-bottom:16px">
+    let html=`<dl class="info-grid" style="margin-bottom:16px">
 <dt>Config Disk</dt><dd>${cfg.persistent?`Persistent (${esc(cfg.type)} on ${esc(cfg.device)})`:'Temporary (tmpfs)'}</dd>
 <dt>Cache Disk</dt><dd>${cache.persistent?`Persistent (${esc(cache.type)} on ${esc(cache.device)})`:'Temporary (tmpfs)'}</dd>
 <dt>Available Disks</dt><dd>${(s.availableDisks||[]).length} detected</dd>
 </dl>`;
+    // Check for expandable disks
+    try{
+      const r=await api('/system/disks/expandable');
+      const disks=r.disks||[];
+      if(disks.length>0){
+        html+=`<div style="margin-bottom:16px">`;
+        disks.forEach(d=>{
+          const role=d.role==='single'?'Disk':d.role==='config'?'Config Disk':'Cache Disk';
+          html+=`<div style="display:flex;align-items:center;gap:12px;padding:10px 12px;background:var(--ac-glow);border:1px solid var(--ac-dim);border-radius:var(--r-md);margin-bottom:8px;flex-wrap:wrap">
+<span style="font-size:1.1rem">&#9889;</span>
+<span style="flex:1;font-size:.9rem">${esc(role)} (${esc(d.device)}): <strong>${fB(d.growBytes)}</strong> available to expand</span>
+<button class="btn btn-sm btn-primary" onclick="expandDisk('${esc(d.device)}')">Expand</button>
+</div>`;
+        });
+        html+=`</div>`;
+      }
+    }catch{}
+    el.innerHTML=html;
   }catch(e){
     const el=$('#settings-disk-status');if(el)el.textContent='Could not load disk status';
   }
@@ -747,6 +1107,42 @@ window.settingsRescanDisks=async function(){
     toast('Disk rescan complete','success');
     fetchSettingsDiskStatus();
   }catch(e){toast(`Rescan failed: ${e.message}`,'error')}
+};
+
+async function fetchSSHStatus(){
+  try{
+    const d=await api('/system/ssh');
+    const cb=$('#ssh-enabled'),lbl=$('#ssh-label'),st=$('#ssh-status');
+    if(cb)cb.checked=!!d.enabled;
+    if(lbl)lbl.textContent=d.enabled?'SSH Enabled':'SSH Disabled';
+    if(st){
+      if(d.running)st.innerHTML='<span style="color:var(--grn)">&#x25CF; Running</span>';
+      else if(d.enabled)st.innerHTML='<span style="color:var(--yel)">&#x25CF; Stopped</span>';
+      else st.innerHTML='<span style="color:var(--tx-m)">&#x25CF; Stopped</span>';
+    }
+  }catch{}
+}
+
+window.toggleSSH=async function(enabled){
+  const cb=$('#ssh-enabled'),lbl=$('#ssh-label'),st=$('#ssh-status');
+  if(lbl)lbl.textContent=enabled?'Enabling...':'Disabling...';
+  if(st)st.innerHTML='<span class="spinner"></span>';
+  try{
+    const d=await api('/system/ssh',{method:'PUT',body:{enabled}});
+    toast(enabled?'SSH enabled':'SSH disabled','success');
+    if(cb)cb.checked=!!d.enabled;
+    if(lbl)lbl.textContent=d.enabled?'SSH Enabled':'SSH Disabled';
+    if(st){
+      if(d.running)st.innerHTML='<span style="color:var(--grn)">&#x25CF; Running</span>';
+      else st.innerHTML='<span style="color:var(--tx-m)">&#x25CF; Stopped</span>';
+    }
+  }catch(e){
+    toast(`SSH toggle failed: ${e.message}`,'error');
+    if(cb)cb.checked=!enabled;
+    if(lbl)lbl.textContent=enabled?'SSH Disabled':'SSH Enabled';
+    if(st)st.textContent='';
+    fetchSSHStatus();
+  }
 };
 
 window.wipeDisk=async function(diskType){

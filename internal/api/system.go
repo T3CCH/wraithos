@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/wraithos/wraith-ui/internal/auth"
 	"github.com/wraithos/wraith-ui/internal/storage"
 	"github.com/wraithos/wraith-ui/internal/system"
 )
@@ -329,6 +330,55 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sync the root password so SSH/console login uses the same credentials.
+	// Non-fatal: log a warning but don't fail the password change if chpasswd fails.
+	if err := auth.SyncRootPassword(newPw); err != nil {
+		s.Logs.Warn("auth", "failed to sync root password: %v", err)
+	} else {
+		s.Logs.Info("auth", "root password synced with web console")
+	}
+
 	s.Logs.Info("auth", "password changed")
 	writeOK(w, map[string]string{"status": "password changed"})
+}
+
+// handleSSHGet returns the current SSH service status.
+func (s *Server) handleSSHGet(w http.ResponseWriter, r *http.Request) {
+	status, err := system.GetSSHStatus()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeOK(w, status)
+}
+
+// handleSSHSet enables or disables the SSH service.
+func (s *Server) handleSSHSet(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := decodeJSONLenient(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Enabled {
+		if err := system.EnableSSH(); err != nil {
+			s.Logs.Error("ssh", "enable failed: %v", err)
+			writeError(w, http.StatusInternalServerError, "failed to enable SSH: "+err.Error())
+			return
+		}
+		s.Logs.Info("ssh", "SSH enabled via web UI")
+	} else {
+		if err := system.DisableSSH(); err != nil {
+			s.Logs.Error("ssh", "disable failed: %v", err)
+			writeError(w, http.StatusInternalServerError, "failed to disable SSH: "+err.Error())
+			return
+		}
+		s.Logs.Info("ssh", "SSH disabled via web UI")
+	}
+
+	// Return updated status
+	status, _ := system.GetSSHStatus()
+	writeOK(w, status)
 }

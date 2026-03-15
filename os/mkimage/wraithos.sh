@@ -3,7 +3,7 @@
 # This profile builds a UEFI-bootable ISO containing:
 #   - Alpine Linux with virt kernel (VM-optimized)
 #   - Docker + docker-compose
-#   - Networking (nftables, cifs-utils, nfs-utils)
+#   - Networking (nftables, cifs-utils, nfs-utils, openssh)
 #   - squashfs root filesystem for RAM-based boot
 #   - GRUB EFI bootloader
 #
@@ -45,6 +45,7 @@ profile_wraithos() {
         nftables
         cifs-utils
         nfs-utils
+        openssh
         e2fsprogs
         squashfs-tools
         zram-init

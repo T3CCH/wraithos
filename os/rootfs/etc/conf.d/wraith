@@ -7,11 +7,13 @@
 # Disk labels used to find config and cache partitions
 WRAITH_CONFIG_LABEL="WRAITH-CONFIG"
 WRAITH_CACHE_LABEL="WRAITH-CACHE"
+WRAITH_SINGLE_LABEL="WRAITH-SINGLE"
 
 # Mount points
 WRAITH_CONFIG_DIR="/wraith/config"
 WRAITH_CONFIG_DISK_DIR="/wraith/config-disk"
 WRAITH_CACHE_DIR="/wraith/cache"
+WRAITH_SINGLE_DIR="/wraith/disk"
 
 # Docker settings
 WRAITH_DOCKER_DATA_ROOT="/wraith/cache/docker"

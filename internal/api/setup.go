@@ -13,9 +13,10 @@ import (
 // --- Setup status ---
 
 type diskStatusResponse struct {
-	ConfigDisk     setup.MountStatus  `json:"configDisk"`
-	CacheDisk      setup.MountStatus  `json:"cacheDisk"`
-	NeedsDiskSetup bool               `json:"needsDiskSetup"`
+	ConfigDisk     setup.MountStatus   `json:"configDisk"`
+	CacheDisk      setup.MountStatus   `json:"cacheDisk"`
+	NeedsDiskSetup bool                `json:"needsDiskSetup"`
+	SingleDiskMode bool                `json:"singleDiskMode"`
 	AvailableDisks []setup.BlockDevice `json:"availableDisks"`
 }
 
@@ -33,6 +34,7 @@ func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 		ConfigDisk:     config,
 		CacheDisk:      cache,
 		NeedsDiskSetup: !config.Persistent || !cache.Persistent,
+		SingleDiskMode: setup.IsSingleDiskMode(),
 		AvailableDisks: disks,
 	})
 }
@@ -40,21 +42,28 @@ func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 // --- Disk setup ---
 
 type diskSetupRequest struct {
+	Mode         string `json:"mode"`         // "dual" (default) or "single"
 	ConfigDisk   string `json:"configDisk"`
 	CacheDisk    string `json:"cacheDisk"`
+	SingleDisk   string `json:"singleDisk"`   // device for single-disk mode
 	ConfirmFormat bool  `json:"confirmFormat"`
 }
 
 type diskSetupResponse struct {
 	Status             string                  `json:"status"`
+	Mode               string                  `json:"mode"`
 	ConfigDisk         *setup.DiskSetupResult  `json:"configDisk,omitempty"`
 	CacheDisk          *setup.DiskSetupResult  `json:"cacheDisk,omitempty"`
+	SingleDisk         *setup.DiskSetupResult  `json:"singleDisk,omitempty"`
 	RebootRecommended  bool                    `json:"rebootRecommended"`
 	HotRemountSuccess  bool                    `json:"hotRemountSuccess"`
 	MigratedFiles      []string                `json:"migratedFiles"`
 }
 
 // handleSetupDisks formats and mounts disks (POST /api/setup/disks).
+// Supports two modes via the "mode" field:
+//   - "dual" (default): separate config and cache disks (original behavior)
+//   - "single": one disk serves both config and cache via subdirectories
 func (s *Server) handleSetupDisks(w http.ResponseWriter, r *http.Request) {
 	var req diskSetupRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -67,14 +76,14 @@ func (s *Server) handleSetupDisks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.ConfigDisk == "" && req.CacheDisk == "" {
-		writeError(w, http.StatusBadRequest, "at least one disk must be specified")
-		return
+	// Default to dual mode for backwards compatibility
+	mode := req.Mode
+	if mode == "" {
+		mode = "dual"
 	}
 
-	// Validate that config and cache are not the same device
-	if req.ConfigDisk != "" && req.CacheDisk != "" && req.ConfigDisk == req.CacheDisk {
-		writeError(w, http.StatusBadRequest, "config and cache must be different disks")
+	if mode != "dual" && mode != "single" {
+		writeError(w, http.StatusBadRequest, "mode must be \"dual\" or \"single\"")
 		return
 	}
 
@@ -86,33 +95,64 @@ func (s *Server) handleSetupDisks(w http.ResponseWriter, r *http.Request) {
 	defer setup.ReleaseSetup()
 
 	resp := diskSetupResponse{
+		Mode:          mode,
 		MigratedFiles: []string{},
 	}
 
-	// Set up config disk first
-	if req.ConfigDisk != "" {
-		result, migrated, err := setup.SetupDisk(req.ConfigDisk, setup.ConfigLabel)
-		if err != nil {
-			s.Logs.Error("setup", "config disk setup failed: %v", err)
-			writeError(w, http.StatusInternalServerError, err.Error())
+	if mode == "single" {
+		// Single-disk mode: one device for both config and cache
+		if req.SingleDisk == "" {
+			writeError(w, http.StatusBadRequest, "singleDisk must be specified for single disk mode")
 			return
 		}
-		resp.ConfigDisk = result
-		resp.MigratedFiles = append(resp.MigratedFiles, migrated...)
-		s.Logs.Info("setup", "config disk %s: %s", req.ConfigDisk, result.Action)
-	}
 
-	// Set up cache disk
-	if req.CacheDisk != "" {
-		result, migrated, err := setup.SetupDisk(req.CacheDisk, setup.CacheLabel)
+		result, migrated, err := setup.SetupSingleDisk(req.SingleDisk)
 		if err != nil {
-			s.Logs.Error("setup", "cache disk setup failed: %v", err)
+			s.Logs.Error("setup", "single disk setup failed: %v", err)
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		resp.CacheDisk = result
+		resp.SingleDisk = result
 		resp.MigratedFiles = append(resp.MigratedFiles, migrated...)
-		s.Logs.Info("setup", "cache disk %s: %s", req.CacheDisk, result.Action)
+		s.Logs.Info("setup", "single disk %s: %s", req.SingleDisk, result.Action)
+	} else {
+		// Dual-disk mode: separate config and cache (original behavior)
+		if req.ConfigDisk == "" && req.CacheDisk == "" {
+			writeError(w, http.StatusBadRequest, "at least one disk must be specified")
+			return
+		}
+
+		// Validate that config and cache are not the same device
+		if req.ConfigDisk != "" && req.CacheDisk != "" && req.ConfigDisk == req.CacheDisk {
+			writeError(w, http.StatusBadRequest, "config and cache must be different disks")
+			return
+		}
+
+		// Set up config disk first
+		if req.ConfigDisk != "" {
+			result, migrated, err := setup.SetupDisk(req.ConfigDisk, setup.ConfigLabel)
+			if err != nil {
+				s.Logs.Error("setup", "config disk setup failed: %v", err)
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			resp.ConfigDisk = result
+			resp.MigratedFiles = append(resp.MigratedFiles, migrated...)
+			s.Logs.Info("setup", "config disk %s: %s", req.ConfigDisk, result.Action)
+		}
+
+		// Set up cache disk
+		if req.CacheDisk != "" {
+			result, migrated, err := setup.SetupDisk(req.CacheDisk, setup.CacheLabel)
+			if err != nil {
+				s.Logs.Error("setup", "cache disk setup failed: %v", err)
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			resp.CacheDisk = result
+			resp.MigratedFiles = append(resp.MigratedFiles, migrated...)
+			s.Logs.Info("setup", "cache disk %s: %s", req.CacheDisk, result.Action)
+		}
 	}
 
 	resp.Status = "complete"
@@ -125,7 +165,7 @@ func (s *Server) handleSetupDisks(w http.ResponseWriter, r *http.Request) {
 // --- Disk wipe ---
 
 type diskWipeRequest struct {
-	DiskType    string `json:"diskType"`    // "config" or "cache"
+	DiskType    string `json:"diskType"`    // "config", "cache", or "single"
 	ConfirmWipe bool   `json:"confirmWipe"` // must be true
 }
 
@@ -142,8 +182,8 @@ func (s *Server) handleDiskWipe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.DiskType != "config" && req.DiskType != "cache" {
-		writeError(w, http.StatusBadRequest, "diskType must be \"config\" or \"cache\"")
+	if req.DiskType != "config" && req.DiskType != "cache" && req.DiskType != "single" {
+		writeError(w, http.StatusBadRequest, "diskType must be \"config\", \"cache\", or \"single\"")
 		return
 	}
 
@@ -274,4 +314,60 @@ func (s *Server) handleReboot(w http.ResponseWriter, r *http.Request) {
 			log.Printf("reboot failed: %s: %v", string(output), err)
 		}
 	}()
+}
+
+// --- Disk expand ---
+
+type expandableDisksResponse struct {
+	Disks []setup.DiskExpandInfo `json:"disks"`
+}
+
+// handleExpandableDisks returns disks that can be expanded
+// (GET /api/system/disks/expandable).
+func (s *Server) handleExpandableDisks(w http.ResponseWriter, r *http.Request) {
+	disks := setup.GetExpandableDisks()
+	if disks == nil {
+		disks = []setup.DiskExpandInfo{}
+	}
+	writeOK(w, expandableDisksResponse{Disks: disks})
+}
+
+type expandDiskRequest struct {
+	Device string `json:"device"`
+}
+
+// handleExpandDisk runs resize2fs on a wraith-managed disk
+// (POST /api/system/disks/expand).
+func (s *Server) handleExpandDisk(w http.ResponseWriter, r *http.Request) {
+	var req expandDiskRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Device == "" {
+		writeError(w, http.StatusBadRequest, "device is required")
+		return
+	}
+
+	// Prevent concurrent disk operations
+	if !setup.AcquireSetup() {
+		writeError(w, http.StatusConflict, "a disk operation is already in progress")
+		return
+	}
+	defer setup.ReleaseSetup()
+
+	s.Logs.Info("system", "expanding filesystem on %s", req.Device)
+
+	if err := setup.ExpandDisk(req.Device); err != nil {
+		s.Logs.Error("system", "expand %s failed: %v", req.Device, err)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.Logs.Info("system", "filesystem on %s expanded successfully", req.Device)
+	writeOK(w, map[string]string{
+		"status": "expanded",
+		"device": req.Device,
+	})
 }

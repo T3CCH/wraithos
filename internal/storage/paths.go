@@ -38,3 +38,9 @@ func SambaFile() string { return filepath.Join(ConfigBase, "samba.json") }
 
 // NetworkFile returns the path to the network configuration file.
 func NetworkFile() string { return filepath.Join(ConfigBase, "network.json") }
+
+// SSHFile returns the path to the SSH service configuration file.
+func SSHFile() string { return filepath.Join(ConfigBase, "ssh.json") }
+
+// ComposeSettingsFile returns the path to the compose settings file.
+func ComposeSettingsFile() string { return filepath.Join(ComposeDir(), "settings.json") }

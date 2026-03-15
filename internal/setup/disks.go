@@ -23,7 +23,12 @@ import (
 const (
 	ConfigLabel = "WRAITH-CONFIG"
 	CacheLabel  = "WRAITH-CACHE"
+	SingleLabel = "WRAITH-SINGLE"
 )
+
+// SingleDiskDir is the mount point for a single-disk setup.
+// Config and cache subdirectories live beneath this.
+const SingleDiskDir = "/wraith/disk"
 
 // validDevicePath matches /dev/[a-z]+[0-9]* (e.g. /dev/xvda, /dev/sdb1).
 var validDevicePath = regexp.MustCompile(`^/dev/[a-z]+[0-9]*$`)
@@ -194,6 +199,8 @@ func hasChildAtSystemMount(children []lsblkDevice) bool {
 // and /wraith/cache are backed by tmpfs or real block devices.
 // For the config disk, the RAM-based architecture means ConfigBase is
 // always tmpfs, so we also check ConfigDiskDir for the physical disk.
+// In single-disk mode, both config and cache are backed by subdirectories
+// of the WRAITH-SINGLE mount via bind mounts.
 func GetDiskStatus() (config, cache MountStatus) {
 	config = getMountStatus(storage.ConfigBase)
 
@@ -212,6 +219,26 @@ func GetDiskStatus() (config, cache MountStatus) {
 	}
 
 	cache = getMountStatus(storage.CacheDisk)
+
+	// Check for single-disk mode: if SingleDiskDir is mounted with
+	// WRAITH-SINGLE label, both config and cache are persistent via
+	// bind mounts from that single disk.
+	if IsSingleDiskMode() {
+		singleMs := getMountStatus(SingleDiskDir)
+		if !config.Persistent {
+			config.Persistent = true
+			config.Device = singleMs.Device
+			config.Label = SingleLabel
+			config.Type = "single-disk"
+		}
+		if !cache.Persistent {
+			cache.Persistent = true
+			cache.Device = singleMs.Device
+			cache.Label = SingleLabel
+			cache.Type = "single-disk"
+		}
+	}
+
 	return config, cache
 }
 
@@ -610,7 +637,7 @@ func StartDocker() error {
 
 // WipeDisk wipes a wraith disk by unmounting it, reformatting it with the
 // correct label, and remounting it with a clean directory layout.
-// diskType must be "config" or "cache".
+// diskType must be "config", "cache", or "single".
 func WipeDisk(diskType string) error {
 	var label, mountpoint string
 	switch diskType {
@@ -620,8 +647,11 @@ func WipeDisk(diskType string) error {
 	case "cache":
 		label = CacheLabel
 		mountpoint = storage.CacheDisk
+	case "single":
+		label = SingleLabel
+		mountpoint = SingleDiskDir
 	default:
-		return fmt.Errorf("invalid disk type %q: must be \"config\" or \"cache\"", diskType)
+		return fmt.Errorf("invalid disk type %q: must be \"config\", \"cache\", or \"single\"", diskType)
 	}
 
 	// Find the device backing this mount point
@@ -834,4 +864,357 @@ func SetupDisk(device, label string) (*DiskSetupResult, []string, error) {
 
 	result.Mounted = true
 	return result, migrated, nil
+}
+
+// SetupSingleDisk handles the full workflow for a single-disk setup where
+// one device serves both config and cache roles using subdirectories.
+// The disk is formatted with the WRAITH-SINGLE label and mounted at
+// SingleDiskDir with config/ and cache/ subdirectories. Bind mounts map
+// these to the standard paths so existing code works transparently.
+func SetupSingleDisk(device string) (*DiskSetupResult, []string, error) {
+	if err := ValidateDevice(device); err != nil {
+		return nil, nil, err
+	}
+
+	result := &DiskSetupResult{
+		Device: device,
+	}
+
+	existingLabel := getDeviceLabel(device)
+	var migrated []string
+
+	// Stop Docker before any cache-related operations
+	if err := StopDocker(); err != nil {
+		log.Printf("warning: failed to stop docker: %v", err)
+	}
+
+	if existingLabel == SingleLabel {
+		// Already labeled correctly -- just mount
+		result.Action = "mounted"
+
+		if mnt := isDeviceMounted(device); mnt != "" {
+			// Already mounted somewhere; if not at SingleDiskDir, unmount first
+			if mnt != SingleDiskDir {
+				cmd := exec.Command("umount", device)
+				if output, err := cmd.CombinedOutput(); err != nil {
+					StartDocker()
+					return nil, nil, fmt.Errorf("unmount %s from %s: %s: %w",
+						device, mnt, strings.TrimSpace(string(output)), err)
+				}
+			}
+		}
+
+		if !isMountpointActive(SingleDiskDir) {
+			if err := MountDisk(device, SingleDiskDir); err != nil {
+				StartDocker()
+				return nil, nil, fmt.Errorf("mount single disk: %w", err)
+			}
+		}
+	} else {
+		// Need to format
+		result.Action = "formatted"
+
+		if err := unmountAndFormat(device, SingleLabel); err != nil {
+			StartDocker()
+			return nil, nil, err
+		}
+
+		if err := MountDisk(device, SingleDiskDir); err != nil {
+			StartDocker()
+			return nil, nil, fmt.Errorf("mount single disk: %w", err)
+		}
+	}
+
+	// Create the subdirectory layout
+	configDir := filepath.Join(SingleDiskDir, "config")
+	cacheDir := filepath.Join(SingleDiskDir, "cache")
+
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		StartDocker()
+		return nil, nil, fmt.Errorf("create config subdir: %w", err)
+	}
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		StartDocker()
+		return nil, nil, fmt.Errorf("create cache subdir: %w", err)
+	}
+
+	// Initialize layouts inside subdirectories
+	if err := InitConfigLayout(configDir); err != nil {
+		StartDocker()
+		return nil, nil, fmt.Errorf("init config layout on single disk: %w", err)
+	}
+	if err := InitCacheLayout(cacheDir); err != nil {
+		StartDocker()
+		return nil, nil, fmt.Errorf("init cache layout on single disk: %w", err)
+	}
+
+	// Migrate existing tmpfs content from the standard config path
+	configMs := getMountStatus(storage.ConfigBase)
+	if configMs.Mounted && !configMs.Persistent {
+		entries, err := os.ReadDir(storage.ConfigBase)
+		if err == nil {
+			for _, entry := range entries {
+				src := filepath.Join(storage.ConfigBase, entry.Name())
+				cpCmd := exec.Command("cp", "-a", src, configDir+"/")
+				if output, cpErr := cpCmd.CombinedOutput(); cpErr != nil {
+					log.Printf("warning: failed to migrate config %s: %s",
+						entry.Name(), strings.TrimSpace(string(output)))
+				} else {
+					migrated = append(migrated, entry.Name())
+				}
+			}
+		}
+
+		// Unmount tmpfs at ConfigBase so we can bind mount over it
+		umountCmd := exec.Command("umount", storage.ConfigBase)
+		if output, err := umountCmd.CombinedOutput(); err != nil {
+			lazyCmd := exec.Command("umount", "-l", storage.ConfigBase)
+			if output, err := lazyCmd.CombinedOutput(); err != nil {
+				log.Printf("warning: unmount config tmpfs: %s: %v",
+					strings.TrimSpace(string(output)), err)
+			}
+			// Wait for lazy unmount
+			for i := 0; i < 10; i++ {
+				if !isMountpointActive(storage.ConfigBase) {
+					break
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
+		} else {
+			_ = output
+		}
+	}
+
+	// Unmount existing cache tmpfs if present
+	cacheMs := getMountStatus(storage.CacheDisk)
+	if cacheMs.Mounted && !cacheMs.Persistent {
+		umountCmd := exec.Command("umount", storage.CacheDisk)
+		if output, err := umountCmd.CombinedOutput(); err != nil {
+			lazyCmd := exec.Command("umount", "-l", storage.CacheDisk)
+			if output, err := lazyCmd.CombinedOutput(); err != nil {
+				log.Printf("warning: unmount cache tmpfs: %s: %v",
+					strings.TrimSpace(string(output)), err)
+			}
+			for i := 0; i < 10; i++ {
+				if !isMountpointActive(storage.CacheDisk) {
+					break
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
+		} else {
+			_ = output
+		}
+	}
+
+	// Set up bind mounts so existing paths work transparently:
+	//   /wraith/config-disk -> /wraith/disk/config  (physical config for sync-back)
+	//   /wraith/cache       -> /wraith/disk/cache   (Docker data)
+
+	// Bind mount config subdir to ConfigDiskDir for sync-back
+	if storage.ConfigDiskDir != "" {
+		if err := os.MkdirAll(storage.ConfigDiskDir, 0755); err != nil {
+			log.Printf("warning: create %s: %v", storage.ConfigDiskDir, err)
+		}
+		if !isMountpointActive(storage.ConfigDiskDir) {
+			cmd := exec.Command("mount", "--bind", configDir, storage.ConfigDiskDir)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				log.Printf("warning: bind mount config-disk: %s: %v",
+					strings.TrimSpace(string(output)), err)
+			} else {
+				log.Printf("bind mounted %s -> %s", configDir, storage.ConfigDiskDir)
+			}
+		}
+	}
+
+	// Bind mount cache subdir to CacheDisk path
+	if err := os.MkdirAll(storage.CacheDisk, 0755); err != nil {
+		log.Printf("warning: create %s: %v", storage.CacheDisk, err)
+	}
+	if !isMountpointActive(storage.CacheDisk) {
+		cmd := exec.Command("mount", "--bind", cacheDir, storage.CacheDisk)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			StartDocker()
+			return nil, nil, fmt.Errorf("bind mount cache: %s: %w",
+				strings.TrimSpace(string(output)), err)
+		}
+		log.Printf("bind mounted %s -> %s", cacheDir, storage.CacheDisk)
+	}
+
+	// Re-mount ConfigBase as tmpfs if it was unmounted (RAM-based config arch)
+	if !isMountpointActive(storage.ConfigBase) {
+		if err := os.MkdirAll(storage.ConfigBase, 0755); err != nil {
+			log.Printf("warning: create %s: %v", storage.ConfigBase, err)
+		}
+		cmd := exec.Command("mount", "-t", "tmpfs", "-o", "size=64M", "tmpfs", storage.ConfigBase)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			log.Printf("warning: remount config tmpfs: %s: %v",
+				strings.TrimSpace(string(output)), err)
+		}
+		// Copy config from disk into RAM
+		cpCmd := exec.Command("cp", "-a", configDir+"/.", storage.ConfigBase+"/")
+		if output, err := cpCmd.CombinedOutput(); err != nil {
+			log.Printf("warning: copy config to RAM: %s: %v",
+				strings.TrimSpace(string(output)), err)
+		}
+	}
+
+	// Restart Docker now that cache is bind-mounted
+	if err := StartDocker(); err != nil {
+		log.Printf("warning: failed to restart docker: %v", err)
+	}
+
+	result.Mounted = true
+	return result, migrated, nil
+}
+
+// IsSingleDiskMode checks whether the system is running in single-disk mode
+// by looking for a mounted WRAITH-SINGLE labeled device.
+func IsSingleDiskMode() bool {
+	ms := getMountStatus(SingleDiskDir)
+	return ms.Mounted && ms.Persistent
+}
+
+// DiskExpandInfo describes a disk that can be expanded.
+type DiskExpandInfo struct {
+	Device     string `json:"device"`
+	Label      string `json:"label"`
+	Role       string `json:"role"`       // "config", "cache", or "single"
+	Mountpoint string `json:"mountpoint"`
+	FSBytes    uint64 `json:"fsBytes"`     // current filesystem size
+	DevBytes   uint64 `json:"deviceBytes"` // block device size
+	GrowBytes  uint64 `json:"growBytes"`   // available to grow
+}
+
+// minExpandThreshold is the minimum difference between device size and
+// filesystem size (in bytes) before we offer expansion. Avoids noise
+// from alignment overhead and metadata differences.
+const minExpandThreshold = 100 * 1024 * 1024 // 100 MB
+
+// CheckDiskExpandable checks if a block device is larger than its ext4
+// filesystem, indicating the disk was resized in the hypervisor but the
+// filesystem hasn't been grown yet.
+func CheckDiskExpandable(device, mountpoint string) (expandable bool, fsBytes, devBytes uint64, err error) {
+	if err := ValidateDevice(device); err != nil {
+		return false, 0, 0, err
+	}
+
+	// Get block device size via lsblk
+	cmd := exec.Command("lsblk", "-bndo", "SIZE", device)
+	out, err := cmd.Output()
+	if err != nil {
+		return false, 0, 0, fmt.Errorf("lsblk %s: %w", device, err)
+	}
+	fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &devBytes)
+
+	// Get filesystem size via df (reports the actual filesystem size, not device)
+	dfCmd := exec.Command("df", "--block-size=1", "--output=size", mountpoint)
+	dfOut, err := dfCmd.Output()
+	if err != nil {
+		return false, 0, 0, fmt.Errorf("df %s: %w", mountpoint, err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(dfOut)), "\n")
+	if len(lines) >= 2 {
+		fmt.Sscanf(strings.TrimSpace(lines[1]), "%d", &fsBytes)
+	}
+
+	if devBytes > fsBytes && (devBytes-fsBytes) > minExpandThreshold {
+		return true, fsBytes, devBytes, nil
+	}
+	return false, fsBytes, devBytes, nil
+}
+
+// ExpandDisk runs resize2fs on a mounted ext4 device to grow the filesystem
+// to fill the entire block device. ext4 supports online resize (no unmount
+// needed for grow operations).
+func ExpandDisk(device string) error {
+	diskMu.Lock()
+	defer diskMu.Unlock()
+
+	if err := ValidateDevice(device); err != nil {
+		return err
+	}
+
+	// Verify the device is mounted (resize2fs works online for ext4 grow)
+	mnt := isDeviceMounted(device)
+	if mnt == "" {
+		return fmt.Errorf("device %s is not mounted", device)
+	}
+
+	// Verify this is a wraith-managed disk by checking its label
+	label := getDeviceLabel(device)
+	if label != ConfigLabel && label != CacheLabel && label != SingleLabel {
+		return fmt.Errorf("device %s has label %q: not a wraith-managed disk", device, label)
+	}
+
+	log.Printf("expanding ext4 filesystem on %s (mounted at %s, label %s)", device, mnt, label)
+
+	cmd := exec.Command("resize2fs", device)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("resize2fs %s: %s: %w", device, strings.TrimSpace(string(output)), err)
+	}
+
+	log.Printf("filesystem expanded on %s: %s", device, strings.TrimSpace(string(output)))
+	return nil
+}
+
+// GetExpandableDisks checks all wraith-managed mounted disks and returns
+// those where the block device is larger than the filesystem.
+func GetExpandableDisks() []DiskExpandInfo {
+	var results []DiskExpandInfo
+
+	type diskCheck struct {
+		role       string
+		mountpoint string
+	}
+
+	var checks []diskCheck
+
+	if IsSingleDiskMode() {
+		ms := getMountStatus(SingleDiskDir)
+		if ms.Mounted && ms.Persistent && ms.Device != "" {
+			checks = append(checks, diskCheck{role: "single", mountpoint: SingleDiskDir})
+		}
+	} else {
+		// Check config disk
+		configMs, cacheMs := GetDiskStatus()
+		if configMs.Persistent && configMs.Device != "" {
+			mp := storage.ConfigBase
+			if storage.ConfigDiskDir != "" {
+				mp = storage.ConfigDiskDir
+			}
+			checks = append(checks, diskCheck{role: "config", mountpoint: mp})
+		}
+		if cacheMs.Persistent && cacheMs.Device != "" {
+			checks = append(checks, diskCheck{role: "cache", mountpoint: storage.CacheDisk})
+		}
+	}
+
+	for _, chk := range checks {
+		ms := getMountStatus(chk.mountpoint)
+		if !ms.Mounted || !ms.Persistent || ms.Device == "" {
+			continue
+		}
+
+		expandable, fsBytes, devBytes, err := CheckDiskExpandable(ms.Device, chk.mountpoint)
+		if err != nil {
+			log.Printf("check expand %s (%s): %v", ms.Device, chk.role, err)
+			continue
+		}
+		if !expandable {
+			continue
+		}
+
+		results = append(results, DiskExpandInfo{
+			Device:     ms.Device,
+			Label:      ms.Label,
+			Role:       chk.role,
+			Mountpoint: chk.mountpoint,
+			FSBytes:    fsBytes,
+			DevBytes:   devBytes,
+			GrowBytes:  devBytes - fsBytes,
+		})
+	}
+
+	return results
 }

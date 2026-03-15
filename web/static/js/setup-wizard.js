@@ -28,7 +28,9 @@ let wizState={
   step:1,
   totalSteps:6,
   status:null,        // GET /api/setup/status response
-  assignments:{},     // device -> 'config' | 'cache' | null
+  diskMode:'dual',    // 'dual' (default) or 'single'
+  assignments:{},     // device -> 'config' | 'cache' | null  (dual mode)
+  singleDiskDevice:'', // device for single-disk mode
   networkData:null,   // network config for step 4
   timezone:'UTC',     // selected timezone
   formatResult:null,  // POST /api/setup/disks response
@@ -59,7 +61,9 @@ window.setupWizard={
       catch(e){toast('Could not load setup status','error');return}
     }
     wizState.step=1;
+    wizState.diskMode='dual';
     wizState.assignments={};
+    wizState.singleDiskDevice='';
     wizState.formatResult=null;
     renderWizard();
   },
@@ -181,33 +185,57 @@ function renderStepWelcome(body,footer){
 function renderStepDisks(body,footer){
   const s=wizState.status;
   const disks=s.availableDisks||[];
+  const isSingle=wizState.diskMode==='single';
 
-  // Auto-assign disks by size: smallest -> config, largest -> cache.
-  // Always prefer size-based assignment over label-based, because labels
-  // from a previous setup may be swapped (e.g. user reformatted wrong).
-  if(Object.keys(wizState.assignments).length===0){
-    if(disks.length>=2){
+  // Auto-detect: if only 1 disk available, default to single-disk mode
+  if(Object.keys(wizState.assignments).length===0&&!wizState.singleDiskDevice){
+    if(disks.length===1){
+      wizState.diskMode='single';
+      wizState.singleDiskDevice=disks[0].device;
+    }else if(disks.length>=2){
+      wizState.diskMode='dual';
       const sorted=[...disks].sort((a,b)=>a.sizeBytes-b.sizeBytes);
       wizState.assignments[sorted[0].device]='config';
       wizState.assignments[sorted[sorted.length-1].device]='cache';
-    }else if(disks.length===1){
-      // Single disk: default to config (more critical for persistence)
-      wizState.assignments[disks[0].device]='config';
     }
+  }
+
+  const modeToggle=disks.length>0?`
+  <div class="wizard-mode-toggle" style="margin-bottom:20px">
+    <div style="display:flex;gap:8px;align-items:center">
+      <label class="wizard-role-btn ${!isSingle?'role-active':''}" style="cursor:pointer">
+        <input type="radio" name="disk-mode" value="dual" ${!isSingle?'checked':''} onchange="wizardSetDiskMode('dual')">
+        Dual Disk
+      </label>
+      <label class="wizard-role-btn ${isSingle?'role-active':''}" style="cursor:pointer">
+        <input type="radio" name="disk-mode" value="single" ${isSingle?'checked':''} onchange="wizardSetDiskMode('single')">
+        Single Disk
+      </label>
+    </div>
+    ${isSingle
+      ?`<p class="dim" style="margin-top:8px;font-size:.8rem">Single disk mode: one disk serves both config and cache using subdirectories. Good for VMs with limited disk slots.</p>`
+      :`<p class="dim" style="margin-top:8px;font-size:.8rem">Dual disk mode: separate disks for config (~100MB) and cache (Docker images/data).</p>`}
+    ${disks.length===1?`<div class="wizard-info-box" style="margin-top:8px">Only one disk detected -- single disk mode is recommended.</div>`:``}
+  </div>`:``; // no toggle if no disks
+
+  let diskListHTML='';
+  if(disks.length===0){
+    diskListHTML=`<div class="wizard-no-disks">
+      <p>No available disks detected.</p>
+      <p class="dim" style="margin-top:8px;font-size:.85rem">Attach virtual disks via your hypervisor (XCP-ng, QEMU, etc.) then click Rescan.</p>
+    </div>`;
+  }else if(isSingle){
+    diskListHTML=disks.map(d=>renderSingleDiskCard(d)).join('');
+  }else{
+    diskListHTML=disks.map(d=>renderDiskCard(d)).join('');
   }
 
   body.innerHTML=`
 <div class="wizard-step-content">
   <h2>Disk Detection & Assignment</h2>
-  <p class="dim" style="margin-bottom:16px">Assign available disks to their roles. Each disk can only have one role.</p>
-  <p class="dim" style="margin-bottom:24px;font-size:.8rem">Config disk only needs ~100MB for configuration files. Cache disk stores Docker images and container data.</p>
+  ${modeToggle}
   <div id="wizard-disk-list">
-    ${disks.length===0
-      ?`<div class="wizard-no-disks">
-          <p>No available disks detected.</p>
-          <p class="dim" style="margin-top:8px;font-size:.85rem">Attach virtual disks via your hypervisor (XCP-ng, QEMU, etc.) then click Rescan.</p>
-        </div>`
-      :disks.map(d=>renderDiskCard(d)).join('')}
+    ${diskListHTML}
   </div>
   <div style="margin-top:16px">
     <button class="btn btn-secondary btn-sm" onclick="wizardRescan()" id="btn-rescan">Rescan Disks</button>
@@ -223,9 +251,59 @@ function renderStepDisks(body,footer){
 </div>`;
 }
 
+function renderSingleDiskCard(d){
+  const selected=wizState.singleDiskDevice===d.device;
+  const isWraithLabeled=d.label==='WRAITH-CONFIG'||d.label==='WRAITH-CACHE'||d.label==='WRAITH-SINGLE';
+
+  let statusIcon='';
+  let statusNote='';
+  if(d.label==='WRAITH-SINGLE'){
+    statusIcon='<span class="wizard-disk-icon disk-ok"></span>';
+    statusNote=`<div class="wizard-disk-note note-ok">Already formatted as WRAITH-SINGLE -- will mount without reformatting.</div>`;
+  }else if(d.fstype){
+    statusIcon='<span class="wizard-disk-icon disk-warn"></span>';
+    statusNote=`<div class="wizard-disk-note note-warn">This disk has a ${esc(d.fstype)} filesystem and will be reformatted.</div>`;
+  }
+
+  return `
+<div class="wizard-disk-card ${selected?'disk-assigned':''}">
+  <div class="wizard-disk-info">
+    ${statusIcon}
+    <div class="wizard-disk-details">
+      <div class="wizard-disk-name">${esc(d.device)}</div>
+      <div class="wizard-disk-meta">
+        <span>${fmtBytes(d.sizeBytes)}</span>
+        ${d.fstype?`<span class="mono">${esc(d.fstype)}</span>`:'<span class="dim">Unformatted</span>'}
+        ${d.label?`<span class="mono">${esc(d.label)}</span>`:''}
+      </div>
+    </div>
+  </div>
+  ${statusNote}
+  <div class="wizard-disk-roles">
+    <label class="wizard-role-btn ${selected?'role-active':''}" style="cursor:pointer">
+      <input type="radio" name="single-disk" value="${esc(d.device)}" ${selected?'checked':''} onchange="wizardSelectSingleDisk('${esc(d.device)}')">
+      Use this disk
+    </label>
+  </div>
+</div>`;
+}
+
+window.wizardSetDiskMode=function(mode){
+  wizState.diskMode=mode;
+  // Reset assignments when switching modes
+  wizState.assignments={};
+  wizState.singleDiskDevice='';
+  renderStepDisks($('#wizard-body'),$('#wizard-footer'));
+};
+
+window.wizardSelectSingleDisk=function(device){
+  wizState.singleDiskDevice=device;
+  renderStepDisks($('#wizard-body'),$('#wizard-footer'));
+};
+
 function renderDiskCard(d){
   const assignment=wizState.assignments[d.device]||'';
-  const isWraithLabeled=d.label==='WRAITH-CONFIG'||d.label==='WRAITH-CACHE';
+  const isWraithLabeled=d.label==='WRAITH-CONFIG'||d.label==='WRAITH-CACHE'||d.label==='WRAITH-SINGLE';
   const hasExistingFS=d.fstype&&!isWraithLabeled;
   const hasData=d.hasData||hasExistingFS;
 
@@ -305,6 +383,14 @@ window.wizardRescan=async function(){
 function renderStepConfirm(body,footer){
   const s=wizState.status;
   const disks=s.availableDisks||[];
+  const isSingle=wizState.diskMode==='single';
+
+  // Single-disk mode path
+  if(isSingle){
+    return renderStepConfirmSingle(body,footer,disks);
+  }
+
+  // Dual-disk mode path (original behavior)
   const configDev=findAssigned('config');
   const cacheDev=findAssigned('cache');
 
@@ -393,19 +479,108 @@ function renderStepConfirm(body,footer){
 </div>`;
 }
 
+function renderStepConfirmSingle(body,footer,disks){
+  const dev=wizState.singleDiskDevice;
+  if(!dev){
+    body.innerHTML=`
+<div class="wizard-step-content">
+  <h2>No Disk Selected</h2>
+  <p class="dim" style="margin-bottom:16px">Go back and select a disk for single-disk mode, or skip to continue with temporary storage.</p>
+  <div class="wizard-warn-box">Without a persistent disk, all data will be lost on reboot.</div>
+</div>`;
+    footer.innerHTML=`
+<div class="wizard-footer-left">
+  <button class="btn btn-secondary" onclick="wizardPrev()">Back</button>
+</div>
+<div class="wizard-footer-right">
+  <button class="btn btn-primary" onclick="wizardNext()">Skip Disk Setup</button>
+</div>`;
+    return;
+  }
+
+  const disk=disks.find(d=>d.device===dev);
+  const isSingleLabeled=disk&&disk.label==='WRAITH-SINGLE';
+  const hasExistingFS=disk&&disk.fstype&&!isSingleLabeled;
+  const needsFormat=!isSingleLabeled;
+
+  let actions='';
+  if(isSingleLabeled){
+    actions+=`<div class="wizard-action-row action-ok">Mount existing WRAITH-SINGLE disk (${esc(dev)}) -- no formatting needed</div>`;
+  }else{
+    actions+=`<div class="wizard-action-row action-destructive">Format ${esc(dev)} (${disk?fmtBytes(disk.sizeBytes):''}) as ext4 with label WRAITH-SINGLE</div>`;
+    actions+=`<div class="wizard-action-row action-ok">Create /wraith/disk/config and /wraith/disk/cache subdirectories</div>`;
+    actions+=`<div class="wizard-action-row action-ok">Bind mount subdirectories to standard paths (transparent to all services)</div>`;
+    actions+=`<div class="wizard-action-row action-warn">Docker will be temporarily stopped during setup. Running containers will be interrupted.</div>`;
+  }
+
+  body.innerHTML=`
+<div class="wizard-step-content">
+  <h2>Confirm & Format (Single Disk)</h2>
+  <div class="wizard-actions-list">${actions}</div>
+  ${needsFormat?`
+  <div class="wizard-danger-box">
+    <strong>WARNING:</strong> Formatting will permanently erase all data on the disk. This cannot be undone.
+  </div>
+  ${hasExistingFS?`
+  <div class="form-group" style="margin-top:16px">
+    <label class="form-label">Type FORMAT to confirm (disk has existing data)</label>
+    <input class="form-input" id="format-confirm-text" placeholder="Type FORMAT to proceed" autocomplete="off" style="max-width:300px">
+  </div>
+  `:`
+  <div class="wizard-checkbox-row" style="margin-top:16px">
+    <label class="wizard-check-label">
+      <input type="checkbox" id="format-confirm-check">
+      <span>I understand that formatting will erase all data on the disk</span>
+    </label>
+  </div>
+  `}
+  `:''}
+  <div id="format-progress" class="hidden">
+    <div class="wizard-progress">
+      <div class="wizard-progress-bar" id="format-progress-bar"></div>
+    </div>
+    <div class="wizard-progress-text" id="format-progress-text">Preparing...</div>
+  </div>
+</div>`;
+
+  footer.innerHTML=`
+<div class="wizard-footer-left">
+  <button class="btn btn-secondary" onclick="wizardPrev()" id="btn-format-back">Back</button>
+</div>
+<div class="wizard-footer-right">
+  ${needsFormat
+    ?`<button class="btn btn-danger" onclick="wizardFormat()" id="btn-format">Format & Mount</button>`
+    :`<button class="btn btn-primary" onclick="wizardFormat()" id="btn-format">Mount Disk</button>`}
+</div>`;
+}
+
 window.wizardFormat=async function(){
   const s=wizState.status;
   const disks=s.availableDisks||[];
-  const configDev=findAssigned('config');
-  const cacheDev=findAssigned('cache');
-  const configDisk=configDev?disks.find(d=>d.device===configDev):null;
-  const cacheDisk=cacheDev?disks.find(d=>d.device===cacheDev):null;
-  const configIsWraith=configDisk&&configDisk.label==='WRAITH-CONFIG';
-  const cacheIsWraith=cacheDisk&&cacheDisk.label==='WRAITH-CACHE';
-  const needsFormat=(!configIsWraith&&configDisk)||(!cacheIsWraith&&cacheDisk);
-  const configHasData=configDisk&&configDisk.fstype&&!configIsWraith;
-  const cacheHasData=cacheDisk&&cacheDisk.fstype&&!cacheIsWraith;
-  const hasExistingData=configHasData||cacheHasData;
+  const isSingle=wizState.diskMode==='single';
+
+  // Determine if format is needed and validate confirmation
+  let needsFormat=false;
+  let hasExistingData=false;
+
+  if(isSingle){
+    const dev=wizState.singleDiskDevice;
+    const disk=dev?disks.find(d=>d.device===dev):null;
+    const isSingleLabeled=disk&&disk.label==='WRAITH-SINGLE';
+    needsFormat=!isSingleLabeled;
+    hasExistingData=disk&&disk.fstype&&!isSingleLabeled;
+  }else{
+    const configDev=findAssigned('config');
+    const cacheDev=findAssigned('cache');
+    const configDisk=configDev?disks.find(d=>d.device===configDev):null;
+    const cacheDisk=cacheDev?disks.find(d=>d.device===cacheDev):null;
+    const configIsWraith=configDisk&&configDisk.label==='WRAITH-CONFIG';
+    const cacheIsWraith=cacheDisk&&cacheDisk.label==='WRAITH-CACHE';
+    needsFormat=(!configIsWraith&&configDisk)||(!cacheIsWraith&&cacheDisk);
+    const configHasData=configDisk&&configDisk.fstype&&!configIsWraith;
+    const cacheHasData=cacheDisk&&cacheDisk.fstype&&!cacheIsWraith;
+    hasExistingData=configHasData||cacheHasData;
+  }
 
   // Validation
   if(needsFormat){
@@ -436,7 +611,9 @@ window.wizardFormat=async function(){
   if(progress)progress.classList.remove('hidden');
 
   // Animate progress
-  const steps=['Preparing...','Formatting disks...','Mounting...','Initializing layout...','Migrating data...','Complete'];
+  const steps=isSingle
+    ?['Preparing...','Formatting disk...','Mounting...','Creating layout...','Setting up bind mounts...','Migrating data...','Complete']
+    :['Preparing...','Formatting disks...','Mounting...','Initializing layout...','Migrating data...','Complete'];
   let pctStep=0;
   const progressInterval=setInterval(()=>{
     pctStep++;
@@ -445,12 +622,25 @@ window.wizardFormat=async function(){
     if(txt)txt.textContent=steps[pctStep];
   },1500);
 
-  try{
-    const result=await api('/setup/disks',{method:'POST',body:{
-      configDisk:configDev||'',
-      cacheDisk:cacheDev||'',
+  // Build request body based on mode
+  let reqBody;
+  if(isSingle){
+    reqBody={
+      mode:'single',
+      singleDisk:wizState.singleDiskDevice,
       confirmFormat:true
-    }});
+    };
+  }else{
+    reqBody={
+      mode:'dual',
+      configDisk:findAssigned('config')||'',
+      cacheDisk:findAssigned('cache')||'',
+      confirmFormat:true
+    };
+  }
+
+  try{
+    const result=await api('/setup/disks',{method:'POST',body:reqBody});
     clearInterval(progressInterval);
     if(bar)bar.style.width='100%';
     if(txt)txt.textContent='Complete';
@@ -493,6 +683,7 @@ async function renderStepNetwork(body,footer){
     const d=await api('/network');
     const n=d.network||d;
     wizState.networkData=n;
+    const isDHCP=n.dhcp!==false;
     const formEl=$('#wizard-net-form');
     const loadEl=$('#wizard-net-loading');
     if(loadEl)loadEl.classList.add('hidden');
@@ -501,12 +692,12 @@ async function renderStepNetwork(body,footer){
       formEl.innerHTML=`
 <div class="toggle-wrap" style="margin-bottom:24px">
   <label class="toggle">
-    <input type="checkbox" id="wiz-net-dhcp" checked onchange="wizTogDHCP(this.checked)">
+    <input type="checkbox" id="wiz-net-dhcp" ${isDHCP?'checked':''} onchange="wizTogDHCP(this.checked)">
     <span class="toggle-track"></span><span class="toggle-thumb"></span>
   </label>
   <span class="toggle-label">Use DHCP <span class="dim" style="font-size:.85em">(recommended)</span></span>
 </div>
-<div id="wiz-static-fields" class="hidden">
+<div id="wiz-static-fields" ${isDHCP?'class="hidden"':''}>
   <div class="form-grid">
     <div class="form-group"><label class="form-label">IP Address</label>
       <input class="form-input" id="wiz-net-ip" placeholder="192.168.1.100" value="${esc(n.ip||'')}"></div>
@@ -629,8 +820,13 @@ function renderStepSummary(body,footer){
 
   let summaryItems=[];
   if(r){
-    if(r.configDisk&&r.configDisk.mounted)summaryItems.push(`Config disk (${esc(r.configDisk.device)}): ${r.configDisk.action}`);
-    if(r.cacheDisk&&r.cacheDisk.mounted)summaryItems.push(`Cache disk (${esc(r.cacheDisk.device)}): ${r.cacheDisk.action}`);
+    if(r.mode==='single'&&r.singleDisk&&r.singleDisk.mounted){
+      summaryItems.push(`Single disk (${esc(r.singleDisk.device)}): ${r.singleDisk.action}`);
+      summaryItems.push('Config and cache share one disk via subdirectories');
+    }else{
+      if(r.configDisk&&r.configDisk.mounted)summaryItems.push(`Config disk (${esc(r.configDisk.device)}): ${r.configDisk.action}`);
+      if(r.cacheDisk&&r.cacheDisk.mounted)summaryItems.push(`Cache disk (${esc(r.cacheDisk.device)}): ${r.cacheDisk.action}`);
+    }
     if(r.migratedFiles&&r.migratedFiles.length)summaryItems.push(`Migrated files: ${r.migratedFiles.join(', ')}`);
   }
   if(wizState.networkData){

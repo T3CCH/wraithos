@@ -62,57 +62,87 @@ init_cache_layout() {
 start() {
     ebegin "Detecting WraithOS disks"
 
-    local config_dev cache_dev
+    local config_dev cache_dev single_dev
     local rc=0
 
-    # --- Config disk ---
-    # Strategy: mount the physical config disk at a staging point, then
-    # copy everything into a tmpfs at WRAITH_CONFIG_DIR.  The Go app
-    # reads/writes WRAITH_CONFIG_DIR (RAM) and syncs changes back to the
-    # physical disk at WRAITH_CONFIG_DISK_DIR.  This lets the config disk
-    # be safely swapped without breaking the running system.
-    config_dev=$(find_disk_by_label "$WRAITH_CONFIG_LABEL")
-    if [ -n "$config_dev" ]; then
-        einfo "Config disk found: $config_dev"
+    # --- Check for single-disk mode first ---
+    single_dev=$(find_disk_by_label "$WRAITH_SINGLE_LABEL")
+    if [ -n "$single_dev" ]; then
+        einfo "Single disk found: $single_dev (WRAITH-SINGLE mode)"
 
-        # Mount physical disk at staging location for sync-back
-        mount_disk "$config_dev" "$WRAITH_CONFIG_DISK_DIR" || {
-            ewarn "Failed to mount config disk $config_dev"
+        # Mount the single disk
+        mkdir -p "$WRAITH_SINGLE_DIR"
+        mount_disk "$single_dev" "$WRAITH_SINGLE_DIR" || {
+            ewarn "Failed to mount single disk $single_dev"
             rc=1
         }
 
-        # Create tmpfs for the live config (RAM-backed)
+        # Ensure subdirectories exist
+        mkdir -p "$WRAITH_SINGLE_DIR/config"
+        mkdir -p "$WRAITH_SINGLE_DIR/cache"
+
+        # Set up config: physical disk dir is the config subdirectory
+        mkdir -p "$WRAITH_CONFIG_DISK_DIR"
+        mount --bind "$WRAITH_SINGLE_DIR/config" "$WRAITH_CONFIG_DISK_DIR"
+
+        # Create tmpfs for live config (RAM-backed) and load from disk
         mkdir -p "$WRAITH_CONFIG_DIR"
         mount -t tmpfs -o size=64m,noatime tmpfs "$WRAITH_CONFIG_DIR"
+        cp -a "$WRAITH_SINGLE_DIR/config"/. "$WRAITH_CONFIG_DIR"/ 2>/dev/null || true
+        einfo "Config loaded into RAM from single disk"
 
-        # Copy config from physical disk into RAM
-        if mountpoint -q "$WRAITH_CONFIG_DISK_DIR" 2>/dev/null; then
-            cp -a "$WRAITH_CONFIG_DISK_DIR"/. "$WRAITH_CONFIG_DIR"/ 2>/dev/null || true
-            einfo "Config loaded into RAM from $config_dev"
-        fi
-    else
-        ewarn "Config disk ($WRAITH_CONFIG_LABEL) not found -- using tmpfs fallback"
-        mkdir -p "$WRAITH_CONFIG_DIR"
-        mount -t tmpfs -o size=64m,noatime tmpfs "$WRAITH_CONFIG_DIR"
-        ewarn "WARNING: Configuration will not persist across reboots"
-    fi
-    init_config_layout "$WRAITH_CONFIG_DIR"
+        init_config_layout "$WRAITH_CONFIG_DIR"
 
-    # --- Cache disk ---
-    cache_dev=$(find_disk_by_label "$WRAITH_CACHE_LABEL")
-    if [ -n "$cache_dev" ]; then
-        einfo "Cache disk found: $cache_dev"
-        mount_disk "$cache_dev" "$WRAITH_CACHE_DIR" || {
-            ewarn "Failed to mount cache disk $cache_dev"
-            rc=1
-        }
-    else
-        ewarn "Cache disk ($WRAITH_CACHE_LABEL) not found -- Docker will use RAM"
+        # Set up cache: bind mount the cache subdirectory
         mkdir -p "$WRAITH_CACHE_DIR"
-        mount -t tmpfs -o size=1g,noatime tmpfs "$WRAITH_CACHE_DIR"
-        ewarn "WARNING: Docker images and data will not persist across reboots"
+        mount --bind "$WRAITH_SINGLE_DIR/cache" "$WRAITH_CACHE_DIR"
+        einfo "Cache mounted from single disk"
+
+        init_cache_layout "$WRAITH_CACHE_DIR"
+    else
+        # --- Dual-disk mode (original behavior) ---
+
+        # --- Config disk ---
+        config_dev=$(find_disk_by_label "$WRAITH_CONFIG_LABEL")
+        if [ -n "$config_dev" ]; then
+            einfo "Config disk found: $config_dev"
+
+            mount_disk "$config_dev" "$WRAITH_CONFIG_DISK_DIR" || {
+                ewarn "Failed to mount config disk $config_dev"
+                rc=1
+            }
+
+            mkdir -p "$WRAITH_CONFIG_DIR"
+            mount -t tmpfs -o size=64m,noatime tmpfs "$WRAITH_CONFIG_DIR"
+
+            if mountpoint -q "$WRAITH_CONFIG_DISK_DIR" 2>/dev/null; then
+                cp -a "$WRAITH_CONFIG_DISK_DIR"/. "$WRAITH_CONFIG_DIR"/ 2>/dev/null || true
+                einfo "Config loaded into RAM from $config_dev"
+            fi
+        else
+            ewarn "Config disk ($WRAITH_CONFIG_LABEL) not found -- using tmpfs fallback"
+            mkdir -p "$WRAITH_CONFIG_DIR"
+            mount -t tmpfs -o size=64m,noatime tmpfs "$WRAITH_CONFIG_DIR"
+            ewarn "WARNING: Configuration will not persist across reboots"
+        fi
+        init_config_layout "$WRAITH_CONFIG_DIR"
+
+        # --- Cache disk ---
+        cache_dev=$(find_disk_by_label "$WRAITH_CACHE_LABEL")
+        if [ -n "$cache_dev" ]; then
+            einfo "Cache disk found: $cache_dev"
+            mount_disk "$cache_dev" "$WRAITH_CACHE_DIR" || {
+                ewarn "Failed to mount cache disk $cache_dev"
+                rc=1
+            }
+        else
+            ewarn "Cache disk ($WRAITH_CACHE_LABEL) not found -- Docker will use RAM"
+            mkdir -p "$WRAITH_CACHE_DIR"
+            mount -t tmpfs -o size=1g,noatime tmpfs "$WRAITH_CACHE_DIR"
+            ewarn "WARNING: Docker images and data will not persist across reboots"
+        fi
+        init_cache_layout "$WRAITH_CACHE_DIR"
     fi
-    init_cache_layout "$WRAITH_CACHE_DIR"
 
     # --- Docker daemon configuration ---
     # Write daemon.json before the docker service starts (wraith-disks runs
@@ -158,6 +188,7 @@ stop() {
     umount "$WRAITH_CACHE_DIR" 2>/dev/null || true
     umount "$WRAITH_CONFIG_DIR" 2>/dev/null || true
     umount "$WRAITH_CONFIG_DISK_DIR" 2>/dev/null || true
+    umount "$WRAITH_SINGLE_DIR" 2>/dev/null || true
 
     eend 0
 }

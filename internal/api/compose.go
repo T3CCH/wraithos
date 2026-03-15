@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/wraithos/wraith-ui/internal/docker"
+	"github.com/wraithos/wraith-ui/internal/storage"
 )
 
 type composeContentResponse struct {
@@ -129,6 +130,14 @@ func (s *Server) streamComposeAction(w http.ResponseWriter, r *http.Request, act
 // handleComposeDeploy runs a phased deployment (pull then up) with structured SSE events.
 // Sends events with types: phase, pull_progress, service, output, error, warning, success, complete.
 func (s *Server) handleComposeDeploy(w http.ResponseWriter, r *http.Request) {
+	// Check required mounts before starting the SSE stream
+	if unmounted := s.checkRequiredMounts(); len(unmounted) > 0 {
+		msg := fmt.Sprintf("Cannot deploy: %d mount(s) not available: %s. Mount your shares first or disable 'Require Mounts'.",
+			len(unmounted), strings.Join(unmounted, ", "))
+		writeError(w, http.StatusPreconditionFailed, msg)
+		return
+	}
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming not supported")
@@ -234,4 +243,66 @@ func (s *Server) handleComposeStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	io.WriteString(w, status)
+}
+
+// composeSettings holds compose deployment settings.
+type composeSettings struct {
+	RequireMounts bool `json:"requireMounts"`
+}
+
+// loadComposeSettings reads the compose settings from disk.
+func loadComposeSettings() composeSettings {
+	var settings composeSettings
+	if storage.Exists(storage.ComposeSettingsFile()) {
+		storage.ReadJSON(storage.ComposeSettingsFile(), &settings)
+	}
+	return settings
+}
+
+// handleComposeSettingsGet returns the compose deployment settings.
+func (s *Server) handleComposeSettingsGet(w http.ResponseWriter, r *http.Request) {
+	writeOK(w, loadComposeSettings())
+}
+
+// handleComposeSettingsSet updates the compose deployment settings.
+func (s *Server) handleComposeSettingsSet(w http.ResponseWriter, r *http.Request) {
+	var settings composeSettings
+	if err := decodeJSON(r, &settings); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if err := storage.WriteJSON(storage.ComposeSettingsFile(), settings); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save settings: "+err.Error())
+		return
+	}
+
+	s.Logs.Info("compose", "settings updated: requireMounts=%v", settings.RequireMounts)
+	writeOK(w, settings)
+}
+
+// checkRequiredMounts verifies all configured mounts are active.
+// Returns a list of unmounted share descriptions, or nil if all are mounted.
+func (s *Server) checkRequiredMounts() []string {
+	settings := loadComposeSettings()
+	if !settings.RequireMounts {
+		return nil
+	}
+
+	mounts, err := s.Samba.ListMounts()
+	if err != nil || len(mounts) == 0 {
+		return nil // no mounts configured, nothing to check
+	}
+
+	var unmounted []string
+	for _, m := range mounts {
+		if !m.Mounted {
+			label := m.MountPoint
+			if m.Server != "" && m.Share != "" {
+				label = fmt.Sprintf("%s (%s/%s)", m.MountPoint, m.Server, m.Share)
+			}
+			unmounted = append(unmounted, label)
+		}
+	}
+	return unmounted
 }

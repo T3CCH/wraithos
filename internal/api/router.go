@@ -72,6 +72,10 @@ func (s *Server) registerRoutes(staticFS http.FileSystem) {
 	s.Mux.HandleFunc("POST /api/compose/pull", s.requireAuth(s.handleComposePull))
 	s.Mux.HandleFunc("GET /api/compose/status", s.requireAuth(s.handleComposeStatus))
 
+	// Compose settings endpoints
+	s.Mux.HandleFunc("GET /api/compose/settings", s.requireAuth(s.handleComposeSettingsGet))
+	s.Mux.HandleFunc("PUT /api/compose/settings", s.requireAuth(s.handleComposeSettingsSet))
+
 	// WebSocket endpoints for compose terminal
 	s.Mux.HandleFunc("/api/compose/terminal", s.requireAuth(s.handleComposeTerminal))
 	s.Mux.HandleFunc("/api/compose/deploy/ws", s.requireAuth(s.handleComposeTerminal))
@@ -103,6 +107,25 @@ func (s *Server) registerRoutes(staticFS http.FileSystem) {
 	s.Mux.HandleFunc("GET /api/system/logs", s.requireAuth(s.handleSystemLogs))
 	s.Mux.HandleFunc("GET /api/system/backup", s.requireAuth(s.handleSystemBackup))
 	s.Mux.HandleFunc("POST /api/system/restore", s.requireAuth(s.handleSystemRestore))
+
+	// SSH service endpoints
+	s.Mux.HandleFunc("GET /api/system/ssh", s.requireAuth(s.handleSSHGet))
+	s.Mux.HandleFunc("PUT /api/system/ssh", s.requireAuth(s.handleSSHSet))
+
+	// Disk expand endpoints
+	s.Mux.HandleFunc("GET /api/system/disks/expandable", s.requireAuth(s.handleExpandableDisks))
+	s.Mux.HandleFunc("POST /api/system/disks/expand", s.requireAuth(s.handleExpandDisk))
+
+	// File manager endpoints
+	s.Mux.HandleFunc("GET /api/files/roots", s.requireAuth(s.handleFileRoots))
+	s.Mux.HandleFunc("GET /api/files/list", s.requireAuth(s.handleFileList))
+	s.Mux.HandleFunc("GET /api/files/download", s.requireAuth(s.handleFileDownload))
+	s.Mux.HandleFunc("POST /api/files/upload", s.requireAuth(s.handleFileUpload))
+	s.Mux.HandleFunc("POST /api/files/mkdir", s.requireAuth(s.handleFileMkdir))
+	s.Mux.HandleFunc("POST /api/files/delete", s.requireAuth(s.handleFileDelete))
+	s.Mux.HandleFunc("POST /api/files/move", s.requireAuth(s.handleFileMove))
+	s.Mux.HandleFunc("POST /api/files/copy", s.requireAuth(s.handleFileCopy))
+	s.Mux.HandleFunc("POST /api/files/rename", s.requireAuth(s.handleFileRename))
 
 	// Static file serving (frontend)
 	if staticFS != nil {

@@ -26,6 +26,23 @@ type NetworkStatus struct {
 	DNS       string `json:"dns"`
 }
 
+// LoadNetworkConfig reads the saved network configuration from disk.
+// Returns a default DHCP config if the file does not exist or cannot be read.
+func LoadNetworkConfig() *NetworkConfig {
+	cfg := &NetworkConfig{Mode: "dhcp"}
+	if !storage.Exists(storage.NetworkFile()) {
+		return cfg
+	}
+	if err := storage.ReadJSON(storage.NetworkFile(), cfg); err != nil {
+		return &NetworkConfig{Mode: "dhcp"}
+	}
+	// Normalize: empty mode defaults to DHCP
+	if cfg.Mode == "" {
+		cfg.Mode = "dhcp"
+	}
+	return cfg
+}
+
 // GetNetworkStatus reads the current network configuration from the system.
 func GetNetworkStatus() (*NetworkStatus, error) {
 	iface, err := findDefaultInterface()
@@ -45,11 +62,11 @@ func GetNetworkStatus() (*NetworkStatus, error) {
 
 	dns := getResolvers()
 
-	// Check if DHCP client is running for the interface
-	mode := "static"
-	if isDHCPActive(iface) {
-		mode = "dhcp"
-	}
+	// Determine mode from the saved config file. The saved config is the
+	// source of truth because DHCP clients (udhcpc -q) may exit after
+	// obtaining a lease, making process-based detection unreliable.
+	saved := LoadNetworkConfig()
+	mode := saved.Mode
 
 	return &NetworkStatus{
 		Interface: iface,

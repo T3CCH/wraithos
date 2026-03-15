@@ -48,6 +48,14 @@ func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sync the root password so SSH/console login uses the same credentials.
+	// Non-fatal: log a warning but don't fail setup if chpasswd fails.
+	if err := auth.SyncRootPassword(req.Password); err != nil {
+		s.Logs.Warn("auth", "failed to sync root password: %v", err)
+	} else {
+		s.Logs.Info("auth", "root password synced with web console")
+	}
+
 	s.Logs.Info("auth", "initial setup completed for user %q", req.Username)
 	writeOK(w, map[string]string{"status": "setup complete"})
 }

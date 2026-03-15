@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -223,6 +225,19 @@ func (m *Manager) ChangePassword(currentPassword, newPassword string) error {
 
 	creds.Hash = string(hash)
 	return storage.WriteJSON(storage.AuthFile(), &creds)
+}
+
+// SyncRootPassword sets the system root password to match the web console password.
+// This uses chpasswd which is available on Alpine Linux. Returns an error if the
+// sync fails, but callers should treat this as non-fatal (log a warning, don't
+// fail the web password operation).
+func SyncRootPassword(password string) error {
+	cmd := exec.Command("chpasswd")
+	cmd.Stdin = strings.NewReader("root:" + password)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("chpasswd: %w (output: %s)", err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 // SetSessionCookie writes the session cookie to the response.
