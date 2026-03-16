@@ -15,13 +15,53 @@ depend() {
     provide net
 }
 
-# Parse a JSON value from a file using grep/sed (no jq in minimal Alpine).
+# Parse a JSON string value from a file using grep/sed (no jq in minimal Alpine).
 # This handles simple flat JSON only -- sufficient for network.json.
 # Args: file key
 json_value() {
     local file="$1"
     local key="$2"
     sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$file" | head -1
+}
+
+# Parse a JSON numeric value from a file.
+# Unlike json_value, this extracts unquoted numbers.
+# Args: file key
+json_number() {
+    local file="$1"
+    local key="$2"
+    sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$file" | head -1
+}
+
+# Set up a VLAN sub-interface.
+# Args: base_iface vlan_id
+# Returns the VLAN interface name via stdout.
+setup_vlan() {
+    local base_iface="$1"
+    local vlan_id="$2"
+    local vlan_iface="${base_iface}.${vlan_id}"
+
+    einfo "Setting up VLAN $vlan_id on $base_iface"
+
+    modprobe 8021q 2>/dev/null || {
+        ewarn "Failed to load 8021q module"
+        return 1
+    }
+
+    # Remove existing VLAN interface if present
+    ip link delete "$vlan_iface" 2>/dev/null || true
+
+    ip link add link "$base_iface" name "$vlan_iface" type vlan id "$vlan_id" || {
+        eerror "Failed to create VLAN interface $vlan_iface"
+        return 1
+    }
+
+    ip link set "$vlan_iface" up || {
+        eerror "Failed to bring up $vlan_iface"
+        return 1
+    }
+
+    echo "$vlan_iface"
 }
 
 configure_dhcp() {
@@ -150,6 +190,20 @@ start() {
         [ -n "$file_mode" ] && mode="$file_mode"
     fi
 
+    # Check for VLAN configuration
+    local vlan
+    vlan=$(json_number "$config_file" "vlan")
+    if [ -n "$vlan" ] && [ "$vlan" -gt 0 ] 2>/dev/null; then
+        local vlan_iface
+        vlan_iface=$(setup_vlan "$iface" "$vlan") || {
+            ewarn "VLAN setup failed -- using base interface $iface"
+            vlan=""
+        }
+        if [ -n "$vlan_iface" ]; then
+            iface="$vlan_iface"
+        fi
+    fi
+
     case "$mode" in
         static)
             local address gateway dns
@@ -178,11 +232,26 @@ stop() {
     ebegin "Stopping WraithOS network"
 
     local iface="$WRAITH_NET_INTERFACE"
+    local config_file="$WRAITH_CONFIG_DIR/network.json"
 
     # Flush firewall
     nft flush ruleset 2>/dev/null || true
 
-    # Release DHCP lease
+    # Check for VLAN interface and clean up
+    if [ -f "$config_file" ]; then
+        local vlan
+        vlan=$(json_number "$config_file" "vlan")
+        if [ -n "$vlan" ] && [ "$vlan" -gt 0 ] 2>/dev/null; then
+            local vlan_iface="${iface}.${vlan}"
+            # Release DHCP lease on VLAN interface
+            if [ -f "/var/run/udhcpc.${vlan_iface}.pid" ]; then
+                kill "$(cat "/var/run/udhcpc.${vlan_iface}.pid")" 2>/dev/null || true
+            fi
+            ip link delete "$vlan_iface" 2>/dev/null || true
+        fi
+    fi
+
+    # Release DHCP lease on base interface
     if [ -f "/var/run/udhcpc.$iface.pid" ]; then
         kill "$(cat "/var/run/udhcpc.$iface.pid")" 2>/dev/null || true
     fi
@@ -194,6 +263,16 @@ stop() {
 
 status() {
     local iface="$WRAITH_NET_INTERFACE"
+    local config_file="$WRAITH_CONFIG_DIR/network.json"
+
+    # Check for VLAN interface
+    if [ -f "$config_file" ]; then
+        local vlan
+        vlan=$(json_number "$config_file" "vlan")
+        if [ -n "$vlan" ] && [ "$vlan" -gt 0 ] 2>/dev/null; then
+            iface="${iface}.${vlan}"
+        fi
+    fi
 
     if ip addr show "$iface" 2>/dev/null | grep -q "inet "; then
         local addr

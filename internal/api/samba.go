@@ -92,6 +92,8 @@ func (s *Server) handleMountsByID(w http.ResponseWriter, r *http.Request) {
 		s.handleSambaMount(w, r, id)
 	case r.Method == http.MethodPost && action == "unmount":
 		s.handleSambaUnmount(w, r, id)
+	case r.Method == http.MethodPut && action == "docker-required":
+		s.handleMountDockerRequired(w, r, id)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -127,4 +129,26 @@ func (s *Server) handleSambaUnmount(w http.ResponseWriter, r *http.Request, id s
 
 	s.Logs.Info("samba", "unmounted %s", id)
 	writeOK(w, map[string]string{"status": "unmounted"})
+}
+
+// handleMountDockerRequired updates the "required for Docker" flag on a mount.
+func (s *Server) handleMountDockerRequired(w http.ResponseWriter, r *http.Request, id string) {
+	var req struct {
+		Required bool `json:"required"`
+	}
+	if err := decodeJSONLenient(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if err := s.Samba.UpdateDockerRequired(id, req.Required); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.Logs.Info("samba", "mount %s docker-required=%v", id, req.Required)
+	writeOK(w, map[string]interface{}{
+		"status":         "updated",
+		"dockerRequired": req.Required,
+	})
 }

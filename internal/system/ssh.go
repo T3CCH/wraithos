@@ -7,7 +7,9 @@ package system
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/wraithos/wraith-ui/internal/storage"
@@ -20,22 +22,35 @@ type SSHConfig struct {
 
 // SSHStatus represents the current state of the SSH service.
 type SSHStatus struct {
-	Enabled bool `json:"enabled"` // persisted config setting
-	Running bool `json:"running"` // whether sshd process is actually running
+	Enabled   bool `json:"enabled"`   // persisted config setting
+	Running   bool `json:"running"`   // whether sshd process is actually running
+	Installed bool `json:"installed"` // whether openssh-server is available
 }
 
 // GetSSHStatus checks both the persisted config and the live service state.
 func GetSSHStatus() (*SSHStatus, error) {
 	cfg := loadSSHConfig()
 	running := isSSHDRunning()
+	installed := isSSHDInstalled()
 	return &SSHStatus{
-		Enabled: cfg.Enabled,
-		Running: running,
+		Enabled:   cfg.Enabled,
+		Running:   running,
+		Installed: installed,
 	}, nil
 }
 
 // EnableSSH starts the sshd service and persists the enabled state.
 func EnableSSH() error {
+	// Check that openssh-server is installed
+	if !isSSHDInstalled() {
+		return fmt.Errorf("openssh-server is not installed; install it with: apk add openssh-server")
+	}
+
+	// Generate host keys if they don't exist (required for sshd to start)
+	if err := ensureSSHHostKeys(); err != nil {
+		return fmt.Errorf("generate host keys: %w", err)
+	}
+
 	// Start sshd via OpenRC
 	cmd := exec.Command("rc-service", "sshd", "start")
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -92,6 +107,16 @@ func StartSSHIfEnabled() {
 		return
 	}
 
+	if !isSSHDInstalled() {
+		fmt.Println("ssh: auto-start skipped: openssh-server not installed")
+		return
+	}
+
+	// Generate host keys if needed (may be missing after ISO re-flash)
+	if err := ensureSSHHostKeys(); err != nil {
+		fmt.Printf("ssh: host key generation failed: %v\n", err)
+	}
+
 	cmd := exec.Command("rc-service", "sshd", "start")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		fmt.Printf("ssh: auto-start failed: %s: %v\n",
@@ -118,4 +143,48 @@ func isSSHDRunning() bool {
 	}
 	// OpenRC status output contains "started" when running
 	return strings.Contains(strings.ToLower(string(output)), "started")
+}
+
+// isSSHDInstalled checks if the openssh-server init script exists.
+func isSSHDInstalled() bool {
+	_, err := os.Stat("/etc/init.d/sshd")
+	return err == nil
+}
+
+// ensureSSHHostKeys generates SSH host keys if they don't already exist.
+// On Alpine Linux, sshd will fail to start without host keys.
+func ensureSSHHostKeys() error {
+	keyTypes := []struct {
+		algo string
+		file string
+	}{
+		{"rsa", "/etc/ssh/ssh_host_rsa_key"},
+		{"ecdsa", "/etc/ssh/ssh_host_ecdsa_key"},
+		{"ed25519", "/etc/ssh/ssh_host_ed25519_key"},
+	}
+
+	// Ensure /etc/ssh directory exists
+	if err := os.MkdirAll("/etc/ssh", 0755); err != nil {
+		return fmt.Errorf("create /etc/ssh: %w", err)
+	}
+
+	for _, kt := range keyTypes {
+		if _, err := os.Stat(kt.file); err == nil {
+			continue // key already exists
+		}
+
+		// Ensure parent directory exists (should already from above)
+		dir := filepath.Dir(kt.file)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("create dir %s: %w", dir, err)
+		}
+
+		cmd := exec.Command("ssh-keygen", "-t", kt.algo, "-f", kt.file, "-N", "")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("generate %s key: %s: %w",
+				kt.algo, strings.TrimSpace(string(output)), err)
+		}
+	}
+
+	return nil
 }

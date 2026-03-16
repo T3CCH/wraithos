@@ -17,15 +17,16 @@ var validMountName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 // SambaMount represents a configured network mount (CIFS or NFS).
 type SambaMount struct {
-	ID         string `json:"id"`
-	Type       string `json:"type,omitempty"` // "cifs" (default) or "nfs"
-	Server     string `json:"server"`
-	Share      string `json:"share"`
-	MountPoint string `json:"mountpoint"`
-	Username   string `json:"username"`
-	Password   string `json:"password,omitempty"`
-	Options    string `json:"options,omitempty"`
-	Mounted    bool   `json:"mounted"`
+	ID             string `json:"id"`
+	Type           string `json:"type,omitempty"` // "cifs" (default) or "nfs"
+	Server         string `json:"server"`
+	Share          string `json:"share"`
+	MountPoint     string `json:"mountpoint"`
+	Username       string `json:"username"`
+	Password       string `json:"password,omitempty"`
+	Options        string `json:"options,omitempty"`
+	Mounted        bool   `json:"mounted"`
+	DockerRequired bool   `json:"dockerRequired,omitempty"` // auto-remount + restart Docker stack
 }
 
 // MountType returns the mount type, defaulting to "cifs" for backward compatibility.
@@ -301,6 +302,55 @@ func (m *SambaManager) Unmount(id string) error {
 	}
 
 	return nil
+}
+
+// UpdateDockerRequired sets the "required for Docker" flag on a mount.
+func (m *SambaManager) UpdateDockerRequired(id string, required bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cfg, err := m.loadConfig()
+	if err != nil {
+		return err
+	}
+
+	found := false
+	for i := range cfg.Mounts {
+		if cfg.Mounts[i].ID == id {
+			cfg.Mounts[i].DockerRequired = required
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("mount %s not found", id)
+	}
+
+	return storage.WriteJSON(storage.SambaFile(), cfg)
+}
+
+// GetDockerRequiredMounts returns all mounts flagged as required for Docker.
+// Caller should check Mounted status against the active mount table.
+func (m *SambaManager) GetDockerRequiredMounts() ([]SambaMount, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cfg, err := m.loadConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	mounted := getActiveMounts()
+	var result []SambaMount
+	for _, mount := range cfg.Mounts {
+		if mount.DockerRequired {
+			mount.Mounted = mounted[mount.MountPoint]
+			mount.Password = "" // never expose passwords
+			result = append(result, mount)
+		}
+	}
+	return result, nil
 }
 
 func (m *SambaManager) loadConfig() (*SambaConfig, error) {

@@ -20,7 +20,7 @@ function toast(msg,type='info'){
   setTimeout(()=>{el.classList.add('toast-exit');setTimeout(()=>el.remove(),200)},3500);
 }
 
-const pages=['dashboard','compose','mounts','files','network','settings'];
+const pages=['dashboard','compose','mounts','files','network','docker-networks','settings'];
 let cur='dashboard';
 
 function stopPoll(){if(_poll){clearInterval(_poll);_poll=null}}
@@ -32,7 +32,7 @@ window.navigate=function(p){
   $('#sidebar').classList.remove('open');stopPoll();
   if(p!=='compose'&&_term){_term.destroy();_term=null}
   const m=$('#main-content');m.style.opacity='0';
-  setTimeout(()=>{({dashboard:pgDash,compose:pgCompose,mounts:pgMounts,files:pgFiles,network:pgNetwork,settings:pgSettings}[p]||pgDash)();m.style.opacity='1'},80);
+  setTimeout(()=>{({dashboard:pgDash,compose:pgCompose,mounts:pgMounts,files:pgFiles,network:pgNetwork,'docker-networks':pgDockerNetworks,settings:pgSettings}[p]||pgDash)();m.style.opacity='1'},80);
 };
 window.toggleSidebar=function(){$('#sidebar').classList.toggle('open')};
 window.logout=async function(){try{await api('/auth/logout',{method:'POST'})}catch{}location.href='/login.html'};
@@ -622,7 +622,8 @@ function pgMounts(){
 <div class="form-group"><label class="form-label">Password</label><input class="form-input" id="mnt-pass" type="password" placeholder="optional"></div>
 </div>
 <div class="form-group"><label class="form-label">Options</label><input class="form-input" id="mnt-opts" placeholder="ro,vers=3.0"><div class="form-hint" id="mnt-opts-hint">Additional mount options</div></div>
-</div><div class="form-actions"><button class="btn btn-primary" onclick="addMnt()">Mount</button>
+<div class="form-group" style="grid-column:1/-1"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="mnt-docker-req"> <span class="form-label" style="margin:0">Required for Docker</span></label><div class="form-hint">Auto-remount and restart Docker stack if this mount goes down</div></div>
+</div><div class="form-actions"><button class="btn btn-primary" onclick="addMnt()">Add Mount</button>
 <button class="btn btn-secondary" onclick="hideMntForm()">Cancel</button></div></div></div>
 <div class="mount-list" id="mount-list">${skel(2)}</div>`;
   fetchMnts();
@@ -633,13 +634,14 @@ async function fetchMnts(){
     const d=await api('/mounts'),ms=d.mounts||d||[],l=$('#mount-list');if(!l)return;
     if(!ms.length){l.innerHTML='<div class="empty-state"><h3>No mounts configured</h3><p>Add a network mount (SMB/CIFS or NFS) to share files with containers.</p></div>';return}
     l.innerHTML=ms.map((m,i)=>{const t=(m.type||'cifs').toUpperCase();const src=m.type==='nfs'?`${esc(m.server)}:${esc(m.share)}`:`//${esc(m.server)}/${esc(m.share)}`;
+    const mid=esc(m.id||m.mountpoint);
     return`<div class="mount-card" style="animation-delay:${i*60}ms"><div class="mount-info">
-<h3><span class="container-status ${m.mounted?'status-running':'status-stopped'}"><span class="dot"></span>${m.mounted?'mounted':'unmounted'}</span> ${esc(m.mountpoint||m.path)}</h3>
+<h3><span class="container-status ${m.mounted?'status-running':'status-stopped'}"><span class="dot"></span>${m.mounted?'mounted':'unmounted'}</span> ${esc(m.mountpoint||m.path)}${m.dockerRequired?'<span style="margin-left:8px;font-size:.75rem;padding:2px 8px;border-radius:4px;background:var(--ac-glow);border:1px solid var(--ac-dim);color:var(--ac)">Docker</span>':''}</h3>
 <dl class="mount-details"><dt>Type</dt><dd>${t}</dd><dt>Source</dt><dd>${src}</dd>${m.type!=='nfs'?`<dt>User</dt><dd>${esc(m.username||'guest')}</dd>`:''}<dt>Options</dt><dd>${esc(m.options||'defaults')}</dd></dl>
 ${(m.volumes&&m.volumes.length)?`<div class="mount-volumes"><div class="label">Used by volumes</div>${m.volumes.map(v=>`<span class="volume-tag">${esc(v)}</span>`).join('')}</div>`:''}</div>
-<div class="mount-actions">${m.mounted?`<button class="btn btn-sm btn-secondary" data-mnt-action="unmount" data-mnt-id="${esc(m.id||m.mountpoint)}">Unmount</button>`
-:`<button class="btn btn-sm btn-primary" data-mnt-action="mount" data-mnt-id="${esc(m.id||m.mountpoint)}">Mount</button>`}
-<button class="btn btn-sm btn-danger" data-mnt-action="delete" data-mnt-id="${esc(m.id||m.mountpoint)}">Remove</button></div></div>`}).join('');
+<div class="mount-actions"><label style="display:flex;align-items:center;gap:4px;font-size:.82rem;color:var(--tx-d);cursor:pointer;margin-right:8px" title="Auto-remount and restart Docker stack if unmounted"><input type="checkbox" ${m.dockerRequired?'checked':''} onchange="toggleDockerReq('${mid}',this.checked)"> Docker</label>${m.mounted?`<button class="btn btn-sm btn-secondary" data-mnt-action="unmount" data-mnt-id="${mid}">Unmount</button>`
+:`<button class="btn btn-sm btn-primary" data-mnt-action="mount" data-mnt-id="${mid}">Mount</button>`}
+<button class="btn btn-sm btn-danger" data-mnt-action="delete" data-mnt-id="${mid}">Remove</button></div></div>`}).join('');
     // Event delegation for mount action buttons
     l.addEventListener('click',function(e){const btn=e.target.closest('[data-mnt-action]');if(btn)mntAct(btn.dataset.mntId,btn.dataset.mntAction)});
   }catch(e){const l=$('#mount-list');if(l)l.innerHTML=`<div class="empty-state"><h3>Could not load mounts</h3><p>${esc(e.message)}</p></div>`}
@@ -676,7 +678,7 @@ window.mntNameChanged=function(){
 window.addMnt=async function(){
   const t=document.querySelector('input[name="mnt-type"]:checked').value;
   const d={type:t,server:$('#mnt-server').value,share:$('#mnt-share').value,mountpoint:$('#mnt-name').value,
-    options:$('#mnt-opts').value};
+    options:$('#mnt-opts').value,dockerRequired:!!$('#mnt-docker-req').checked};
   if(t==='cifs'){d.username=$('#mnt-user').value;d.password=$('#mnt-pass').value}
   if(!d.server||!d.share||!d.mountpoint){toast('Server, share, and mount name are required','error');return}
   if(!/^[a-zA-Z0-9_-]+$/.test(d.mountpoint)){toast('Mount name must be alphanumeric, hyphens, or underscores only','error');return}
@@ -687,6 +689,11 @@ window.mntAct=async function(id,a){
   try{if(a==='delete')await api(`/mounts/${encodeURIComponent(id)}`,{method:'DELETE'});
   else await api(`/mounts/${encodeURIComponent(id)}/${a}`,{method:'POST'});toast(`Mount ${a==='delete'?'removed':a+'ed'}`,'success');fetchMnts()}
   catch(e){toast(`Error: ${e.message}`,'error')}
+};
+window.toggleDockerReq=async function(id,required){
+  try{await api(`/mounts/${encodeURIComponent(id)}/docker-required`,{method:'PUT',body:{required}});
+  toast(required?'Mount marked as required for Docker':'Docker requirement removed','success')}
+  catch(e){toast(`Error: ${e.message}`,'error');fetchMnts()}
 };
 
 // ============ NETWORK ============
@@ -772,6 +779,12 @@ function pgFiles(){
 <div class="fb-roots" id="fb-roots"><div class="skeleton skeleton-text"></div></div>
 <div class="fb-breadcrumb" id="fb-breadcrumb"></div>
 </div>
+<div class="fb-bulk-bar hidden" id="fb-bulk-bar">
+<span class="fb-bulk-count" id="fb-bulk-count">0 selected</span>
+<button class="btn btn-sm btn-secondary" onclick="fileBulkCopy()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg> Copy</button>
+<button class="btn btn-sm btn-secondary" onclick="fileBulkMove()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg> Move</button>
+<button class="btn btn-sm btn-danger" onclick="fileBulkDelete()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg> Delete</button>
+</div>
 <div class="fb-drop-zone" id="fb-drop-zone">
 <div class="fb-drop-overlay hidden" id="fb-drop-overlay"><div class="fb-drop-label">${ic.ul} Drop files here to upload</div></div>
 <div class="fb-upload-progress hidden" id="fb-upload-progress"><div class="fb-progress-bar" id="fb-progress-bar"></div><span class="fb-progress-text" id="fb-progress-text"></span></div>
@@ -851,8 +864,21 @@ window.fileBrowse=fileBrowse;
 function fileSortBy(field){fileBrowse(_fileCurPath,field)}
 window.fileSortBy=fileSortBy;
 
+function fileUpdateBulkToolbar(){
+  const bar=$('#fb-bulk-bar');
+  if(!bar)return;
+  const count=_fileSelection.size;
+  if(count>0){
+    bar.classList.remove('hidden');
+    $('#fb-bulk-count').textContent=count+' selected';
+  }else{
+    bar.classList.add('hidden');
+  }
+}
+
 function fileToggleSelect(path,checked){
   if(checked)_fileSelection.add(path);else _fileSelection.delete(path);
+  fileUpdateBulkToolbar();
 }
 window.fileToggleSelect=fileToggleSelect;
 
@@ -863,8 +889,36 @@ function fileSelectAll(checked){
     const row=cb.closest('tr');
     if(row&&checked)_fileSelection.add(row.dataset.path);
   });
+  fileUpdateBulkToolbar();
 }
 window.fileSelectAll=fileSelectAll;
+
+async function fileBulkDelete(){
+  const paths=[..._fileSelection];
+  if(!paths.length)return;
+  if(!confirm(`Delete ${paths.length} item(s)? This cannot be undone.`))return;
+  let ok=0,fail=0;
+  for(const p of paths){
+    try{await api('/files/delete',{method:'POST',body:{path:p}});ok++}catch{fail++}
+  }
+  toast(`Deleted ${ok} item(s)${fail?' ('+fail+' failed)':''}`,'success');
+  _fileSelection.clear();fileUpdateBulkToolbar();fileBrowse(_fileCurPath);
+}
+window.fileBulkDelete=fileBulkDelete;
+
+function fileBulkCopy(){
+  const paths=[..._fileSelection];
+  if(!paths.length)return;
+  fileShowCopyModal(paths,paths.map(p=>p.split('/').pop()),false);
+}
+window.fileBulkCopy=fileBulkCopy;
+
+function fileBulkMove(){
+  const paths=[..._fileSelection];
+  if(!paths.length)return;
+  fileShowCopyModal(paths,paths.map(p=>p.split('/').pop()),true);
+}
+window.fileBulkMove=fileBulkMove;
 
 function fileDownload(path){
   const a=document.createElement('a');
@@ -910,30 +964,111 @@ async function fileRenamePrompt(path,oldName){
 }
 window.fileRenamePrompt=fileRenamePrompt;
 
-async function fileCopyPrompt(path,name,isDir){
+// ---- Copy/Move Modal with folder browser ----
+let _copyModalState={sources:[],names:[],isMove:false,curPath:''};
+
+function fileShowCopyModal(sources,names,isMove){
   if(!_fileRoots||!_fileRoots.length){toast('No destinations available','error');return}
-  // Build destination picker: show all roots except the one this file is already in
-  const srcRoot=_fileRoots.find(r=>path===r.path||path.startsWith(r.path+'/'));
-  const dests=_fileRoots.filter(r=>r!==srcRoot);
-  if(!dests.length){toast('No other locations to copy to. Add another mount or use Local Storage.','error');return}
-  let destPath;
-  if(dests.length===1){
-    destPath=dests[0].path;
-    if(!confirm(`Copy "${name}" to ${dests[0].name}?`))return;
-  }else{
-    const choices=dests.map((r,i)=>`${i+1}. ${r.name}`).join('\n');
-    const pick=prompt(`Copy "${name}" to:\n${choices}\n\nEnter number:`);
-    if(!pick)return;
-    const idx=parseInt(pick,10)-1;
-    if(isNaN(idx)||idx<0||idx>=dests.length){toast('Invalid selection','error');return}
-    destPath=dests[idx].path;
-  }
-  const dest=destPath+'/'+name;
+  _copyModalState={sources:Array.isArray(sources)?sources:[sources],names:Array.isArray(names)?names:[names],isMove:!!isMove,curPath:_fileRoots[0].path};
+  const label=isMove?'Move':'Copy';
+  const fileLabel=_copyModalState.names.length===1?'"'+_copyModalState.names[0]+'"':_copyModalState.names.length+' items';
+  // Build modal HTML
+  let html=`<div class="wizard-overlay wizard-visible" id="copy-modal-overlay" onclick="if(event.target===this)fileCopyModalClose()">
+<div class="wizard-card" style="max-width:560px">
+<div class="wizard-header"><div class="wizard-title">${label} ${esc(fileLabel)}</div>
+<button class="wizard-close" onclick="fileCopyModalClose()"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg></button></div>
+<div class="wizard-body" style="padding:16px 24px">
+<div class="fb-roots" id="copy-modal-roots" style="margin-bottom:12px"></div>
+<div class="fb-breadcrumb" id="copy-modal-breadcrumb" style="margin-bottom:12px"></div>
+<div class="copy-modal-list" id="copy-modal-list" style="max-height:280px;overflow-y:auto;border:1px solid var(--bdr);border-radius:var(--r-md);background:var(--bg-inp)"></div>
+<div style="margin-top:12px"><button class="btn btn-sm btn-secondary" onclick="fileCopyModalNewFolder()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> New Folder</button></div>
+</div>
+<div class="wizard-footer"><div class="wizard-footer-left"><button class="btn btn-secondary" onclick="fileCopyModalClose()">Cancel</button></div>
+<div class="wizard-footer-right"><button class="btn btn-primary" id="copy-modal-confirm" onclick="fileCopyModalConfirm()">${label} Here</button></div></div>
+</div></div>`;
+  // Remove existing modal if any
+  const existing=$('#copy-modal-overlay');
+  if(existing)existing.remove();
+  document.body.insertAdjacentHTML('beforeend',html);
+  // Render roots
+  const rootsEl=$('#copy-modal-roots');
+  rootsEl.innerHTML=_fileRoots.map(r=>`<button class="btn btn-sm fb-root-btn" onclick="fileCopyModalBrowse('${esc(r.path)}')" title="${esc(r.path)}">
+<span class="fb-root-type fb-type-${esc(r.type)}">${r.type==='local'?'LOCAL':r.type==='volumes'?'VOL':r.type==='nfs'?'NFS':'SMB'}</span>
+${esc(r.name)}</button>`).join('');
+  fileCopyModalBrowse(_copyModalState.curPath);
+}
+
+function fileCopyModalClose(){
+  const overlay=$('#copy-modal-overlay');
+  if(overlay)overlay.remove();
+}
+window.fileCopyModalClose=fileCopyModalClose;
+
+async function fileCopyModalBrowse(path){
+  _copyModalState.curPath=path;
+  // Update breadcrumb
+  const bcEl=$('#copy-modal-breadcrumb');
+  if(bcEl)bcEl.innerHTML=fileBreadcrumb(path);
+  // Highlight active root
+  $$('#copy-modal-roots .fb-root-btn').forEach(btn=>{
+    const btnPath=btn.getAttribute('title');
+    btn.classList.toggle('fb-root-active',path===btnPath||path.startsWith(btnPath+'/'));
+  });
+  const list=$('#copy-modal-list');
+  if(!list)return;
+  list.innerHTML='<div style="padding:16px;text-align:center;color:var(--tx-d)">Loading...</div>';
   try{
-    toast(`Copying ${name}...`,'info');
-    await api('/files/copy',{method:'POST',body:{source:path,destination:dest}});
-    toast(`Copied ${name}`,'success');
-  }catch(e){toast('Copy failed: '+e.message,'error')}
+    const d=await api('/files/list?'+new URLSearchParams({path}));
+    const dirs=(d.files||[]).filter(f=>f.isDir);
+    if(!dirs.length){
+      list.innerHTML='<div style="padding:16px;text-align:center;color:var(--tx-d);font-size:.85rem">No subdirectories</div>';
+      return;
+    }
+    list.innerHTML=dirs.map(f=>{
+      const fp=path+'/'+f.name;
+      return`<div class="copy-modal-dir" onclick="fileCopyModalBrowse('${esc(fp)}')" style="display:flex;align-items:center;gap:8px;padding:8px 14px;cursor:pointer;border-bottom:1px solid var(--bdr);transition:background 150ms">
+<span class="fi fi-dir">&#128193;</span><span style="font-size:.88rem">${esc(f.name)}</span>
+<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--tx-m)" stroke-width="2" style="margin-left:auto"><path d="M9 18l6-6-6-6"/></svg></div>`}).join('');
+  }catch(e){list.innerHTML=`<div style="padding:16px;text-align:center;color:var(--red);font-size:.85rem">${esc(e.message)}</div>`}
+}
+window.fileCopyModalBrowse=fileCopyModalBrowse;
+
+async function fileCopyModalNewFolder(){
+  const name=prompt('New folder name:');
+  if(!name||!name.trim())return;
+  try{
+    await api('/files/mkdir',{method:'POST',body:{path:_copyModalState.curPath+'/'+name.trim()}});
+    toast('Folder created','success');
+    fileCopyModalBrowse(_copyModalState.curPath);
+  }catch(e){toast('Failed to create folder: '+e.message,'error')}
+}
+window.fileCopyModalNewFolder=fileCopyModalNewFolder;
+
+async function fileCopyModalConfirm(){
+  const dest=_copyModalState.curPath;
+  const isMove=_copyModalState.isMove;
+  const endpoint=isMove?'/files/move':'/files/copy';
+  const label=isMove?'Moving':'Copying';
+  const past=isMove?'Moved':'Copied';
+  const btn=$('#copy-modal-confirm');
+  if(btn){btn.disabled=true;btn.textContent=label+'...';}
+  let ok=0,fail=0;
+  for(let i=0;i<_copyModalState.sources.length;i++){
+    const src=_copyModalState.sources[i];
+    const name=_copyModalState.names[i];
+    try{
+      await api(endpoint,{method:'POST',body:{source:src,destination:dest+'/'+name}});
+      ok++;
+    }catch(e){fail++;toast(`Failed: ${name} - ${e.message}`,'error')}
+  }
+  if(ok)toast(`${past} ${ok} item(s)`,'success');
+  fileCopyModalClose();
+  fileBrowse(_fileCurPath);
+}
+window.fileCopyModalConfirm=fileCopyModalConfirm;
+
+function fileCopyPrompt(path,name,isDir){
+  fileShowCopyModal([path],[name],false);
 }
 window.fileCopyPrompt=fileCopyPrompt;
 
@@ -1000,6 +1135,101 @@ function fileInitDragDrop(){
   });
 }
 
+// ============ DOCKER NETWORKS ============
+function pgDockerNetworks(){
+  $('#main-content').innerHTML=`<div class="page-header"><h1 class="page-title">Docker Networks</h1>
+<div class="page-actions"><button class="btn btn-sm btn-primary" onclick="dnetShowCreate()">${ic.plus} Create Network</button></div></div>
+<div id="dnet-create-form" class="hidden" style="margin-bottom:24px"><div class="form-card">
+<h3 style="font-size:.95rem;font-weight:600;margin-bottom:16px">Create Network</h3>
+<div class="form-grid">
+<div class="form-group"><label class="form-label">Name</label><input class="form-input" id="dnet-name" placeholder="my-network"></div>
+<div class="form-group"><label class="form-label">Driver</label><select class="form-input" id="dnet-driver" onchange="dnetDriverChanged()">
+<option value="bridge">bridge</option><option value="macvlan">macvlan</option><option value="ipvlan">ipvlan</option>
+<option value="host">host</option><option value="overlay">overlay</option><option value="none">none</option></select></div>
+<div class="form-group"><label class="form-label">Subnet</label><input class="form-input" id="dnet-subnet" placeholder="172.20.0.0/16"><div class="form-hint">CIDR notation (optional for bridge)</div></div>
+<div class="form-group"><label class="form-label">Gateway</label><input class="form-input" id="dnet-gateway" placeholder="172.20.0.1"><div class="form-hint">Optional</div></div>
+<div class="form-group"><label class="form-label">IP Range</label><input class="form-input" id="dnet-iprange" placeholder="172.20.0.0/24"><div class="form-hint">Optional</div></div>
+<div class="form-group" id="dnet-parent-group" style="display:none"><label class="form-label">Parent Interface</label><input class="form-input" id="dnet-parent" placeholder="eth0"><div class="form-hint">Required for macvlan/ipvlan</div></div>
+<div class="form-group" style="grid-column:1/-1"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:.9rem">
+<input type="checkbox" id="dnet-internal"> Internal network (no external access)</label></div>
+</div>
+<div class="form-actions"><button class="btn btn-primary" onclick="dnetCreate()">Create</button>
+<button class="btn btn-secondary" onclick="dnetHideCreate()">Cancel</button></div>
+</div></div>
+<div id="dnet-list" class="stagger">${skel(3)}</div>`;
+  dnetFetch();
+}
+
+window.dnetShowCreate=function(){$('#dnet-create-form').classList.remove('hidden')};
+window.dnetHideCreate=function(){$('#dnet-create-form').classList.add('hidden')};
+
+window.dnetDriverChanged=function(){
+  const drv=$('#dnet-driver').value;
+  const pg=$('#dnet-parent-group');
+  if(pg)pg.style.display=(drv==='macvlan'||drv==='ipvlan')?'':'none';
+};
+
+async function dnetFetch(){
+  try{
+    const d=await api('/docker/networks');
+    const nets=d.networks||[];
+    const el=$('#dnet-list');if(!el)return;
+    if(!nets.length){el.innerHTML='<div class="empty-state"><h3>No networks</h3><p>Docker has no networks configured.</p></div>';return}
+    el.innerHTML=nets.map((n,i)=>{
+      const builtIn=['bridge','host','none'].includes(n.name);
+      return`<div class="card" style="margin-bottom:12px;animation-delay:${i*60}ms">
+<div style="display:flex;align-items:center;justify-content:space-between;padding:16px">
+<div style="flex:1">
+<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+<span style="font-weight:600;font-size:.95rem">${esc(n.name)}</span>
+<span class="badge" style="font-size:.75rem;padding:2px 8px;border-radius:4px;background:var(--bg-card);border:1px solid var(--bd)">${esc(n.driver)}</span>
+${n.internal?'<span class="badge" style="font-size:.75rem;padding:2px 8px;border-radius:4px;background:var(--yel);color:#000">internal</span>':''}
+</div>
+<dl class="container-meta" style="margin:0">
+<dt>ID</dt><dd><code style="font-size:.8rem">${esc(n.id)}</code></dd>
+<dt>Scope</dt><dd>${esc(n.scope)}</dd>
+${n.subnet?`<dt>Subnet</dt><dd>${esc(n.subnet)}</dd>`:''}
+${n.gateway?`<dt>Gateway</dt><dd>${esc(n.gateway)}</dd>`:''}
+<dt>Containers</dt><dd>${n.containers}</dd>
+</dl></div>
+${builtIn?'':`<button class="btn btn-sm btn-danger" onclick="dnetDelete('${esc(n.id)}','${esc(n.name)}')">Delete</button>`}
+</div></div>`}).join('');
+  }catch(e){
+    const el=$('#dnet-list');if(el)el.innerHTML=`<div class="empty-state"><h3>Error</h3><p>${esc(e.message)}</p></div>`;
+  }
+}
+
+window.dnetCreate=async function(){
+  const name=$('#dnet-name').value.trim();
+  if(!name){toast('Network name is required','error');return}
+  const body={
+    name,
+    driver:$('#dnet-driver').value,
+    subnet:$('#dnet-subnet').value.trim(),
+    gateway:$('#dnet-gateway').value.trim(),
+    ipRange:$('#dnet-iprange').value.trim(),
+    internal:$('#dnet-internal').checked,
+    parent:$('#dnet-parent').value.trim()
+  };
+  try{
+    await api('/docker/networks',{method:'POST',body});
+    toast(`Network "${name}" created`,'success');
+    dnetHideCreate();
+    $('#dnet-name').value='';$('#dnet-subnet').value='';$('#dnet-gateway').value='';
+    $('#dnet-iprange').value='';$('#dnet-parent').value='';$('#dnet-internal').checked=false;
+    dnetFetch();
+  }catch(e){toast(`Failed: ${e.message}`,'error')}
+};
+
+window.dnetDelete=async function(id,name){
+  if(!confirm(`Delete network "${name}"?\n\nThis cannot be undone.`))return;
+  try{
+    await api('/docker/networks',{method:'DELETE',body:{id}});
+    toast(`Network "${name}" deleted`,'success');
+    dnetFetch();
+  }catch(e){toast(`Failed: ${e.message}`,'error')}
+};
+
 // ============ SETTINGS ============
 function pgSettings(){
   $('#main-content').innerHTML=`<div class="page-header"><h1 class="page-title">System Settings</h1></div>
@@ -1047,6 +1277,10 @@ function pgSettings(){
 <div><div style="font-weight:600;font-size:.9rem;margin-bottom:2px">Wipe Cache Disk</div>
 <div style="font-size:.82rem;color:var(--tx-d)">Erase all Docker images, volumes, and container data. Docker will be stopped and restarted.</div></div>
 <button class="btn btn-danger" onclick="wipeDisk('cache')" id="btn-wipe-cache">Wipe Cache</button></div>
+<div class="danger-item" style="display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--bd)">
+<div><div style="font-weight:600;font-size:.9rem;margin-bottom:2px">Docker System Prune</div>
+<div style="font-size:.82rem;color:var(--tx-d)">Remove all stopped containers, unused networks, dangling images, and build cache. Running containers are not affected.</div></div>
+<button class="btn btn-danger" onclick="dockerPrune()" id="btn-docker-prune">System Prune</button></div>
 <div class="danger-item" style="display:flex;align-items:center;justify-content:space-between;padding:12px 0">
 <div><div style="font-weight:600;font-size:.9rem;margin-bottom:2px">Reboot Server</div>
 <div style="font-size:.82rem;color:var(--tx-d)">Reboot the server. All running containers will be stopped and restarted on boot.</div></div>
@@ -1113,7 +1347,13 @@ async function fetchSSHStatus(){
   try{
     const d=await api('/system/ssh');
     const cb=$('#ssh-enabled'),lbl=$('#ssh-label'),st=$('#ssh-status');
-    if(cb)cb.checked=!!d.enabled;
+    if(!d.installed){
+      if(cb){cb.checked=false;cb.disabled=true}
+      if(lbl)lbl.textContent='SSH Not Available';
+      if(st)st.innerHTML='<span style="color:var(--tx-d);font-size:.82rem">openssh-server not installed</span>';
+      return;
+    }
+    if(cb){cb.disabled=false;cb.checked=!!d.enabled}
     if(lbl)lbl.textContent=d.enabled?'SSH Enabled':'SSH Disabled';
     if(st){
       if(d.running)st.innerHTML='<span style="color:var(--grn)">&#x25CF; Running</span>';
@@ -1170,6 +1410,21 @@ window.rerunSetupWizard=function(){
   }else{
     toast('Setup wizard is not available','error');
   }
+};
+
+window.dockerPrune=async function(){
+  if(!confirm('Run Docker System Prune?\n\nThis will remove:\n- All stopped containers\n- All unused networks\n- All unused images (not just dangling)\n- All build cache\n\nRunning containers are NOT affected.\n\nThis action cannot be undone.'))return;
+  const btn=$('#btn-docker-prune');if(btn){btn.disabled=true;btn.textContent='Pruning...'}
+  try{
+    const d=await api('/docker/prune',{method:'POST'});
+    const parts=[];
+    if(d.containersDeleted&&d.containersDeleted.length)parts.push(`${d.containersDeleted.length} containers`);
+    if(d.imagesDeleted)parts.push(`${d.imagesDeleted} images`);
+    if(d.networksDeleted&&d.networksDeleted.length)parts.push(`${d.networksDeleted.length} networks`);
+    parts.push(`${fB(d.spaceReclaimed||0)} reclaimed`);
+    toast(`Prune complete: ${parts.join(', ')}`,'success');
+  }catch(e){toast(`Prune failed: ${e.message}`,'error')}
+  finally{if(btn){btn.disabled=false;btn.textContent='System Prune'}}
 };
 
 window.rebootServer=async function(){

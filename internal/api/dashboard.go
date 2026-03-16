@@ -138,11 +138,15 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		} else {
 			resp.Containers = make([]containerInfo, 0, len(containers))
 			for _, c := range containers {
+				ports := c.Ports
+				if ports == nil {
+					ports = []string{}
+				}
 				resp.Containers = append(resp.Containers, containerInfo{
 					Name:  c.Name,
 					Image: c.Image,
 					State: c.State,
-					Ports: []string{},
+					Ports: ports,
 				})
 			}
 		}

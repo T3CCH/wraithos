@@ -1,0 +1,57 @@
+#!/bin/sh
+# wraith-issue.start - Generate /etc/issue with IP address and web UI URL
+#
+# Runs at boot (via local.d) after networking is configured.
+# Writes the system IP and WraithOS web URL to /etc/issue so it
+# appears on the console/TTY before the login prompt.
+
+set -e
+
+# Load wraith config for port and interface
+. /etc/conf.d/wraith
+
+IFACE="${WRAITH_NET_INTERFACE:-eth0}"
+PORT="${WRAITH_UI_PORT:-82}"
+CONFIG_FILE="${WRAITH_CONFIG_DIR}/network.json"
+
+# Check for VLAN configuration and use VLAN interface if set
+if [ -f "$CONFIG_FILE" ]; then
+    VLAN=$(sed -n 's/.*"vlan"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$CONFIG_FILE" | head -1)
+    if [ -n "$VLAN" ] && [ "$VLAN" -gt 0 ] 2>/dev/null; then
+        IFACE="${IFACE}.${VLAN}"
+    fi
+fi
+
+# Get the first IPv4 address on the configured interface
+IP=$(ip -4 addr show "$IFACE" 2>/dev/null \
+    | grep -o 'inet [0-9.]*' \
+    | awk '{print $2}' \
+    | head -1)
+
+if [ -n "$IP" ]; then
+    cat > /etc/issue <<EOF
+
+  WraithOS - Docker Container Host
+  --------------------------------
+  IP Address:  ${IP}
+  Web UI:      http://${IP}:${PORT}
+  --------------------------------
+
+  Log in below or manage via web browser.
+  Run 'wraith-setup' for system configuration.
+
+EOF
+else
+    cat > /etc/issue <<EOF
+
+  WraithOS - Docker Container Host
+  --------------------------------
+  Network:     not connected
+  --------------------------------
+
+  Run 'wraith-setup' to configure networking.
+
+EOF
+fi
+
+echo "[wraith-issue] Console banner configured"

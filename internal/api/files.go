@@ -62,6 +62,16 @@ func (s *Server) getAllowedRoots() []fileRoot {
 		}
 	}
 
+	// Add Docker compose/config directory as a browsable root
+	composeDir := storage.ComposeDir()
+	if info, err := os.Stat(composeDir); err == nil && info.IsDir() {
+		roots = append(roots, fileRoot{
+			Name: "Docker Config",
+			Path: composeDir,
+			Type: "local",
+		})
+	}
+
 	// Add cache disk root if available (for data migration)
 	if info, err := os.Stat(storage.CacheDisk); err == nil && info.IsDir() {
 		roots = append(roots, fileRoot{

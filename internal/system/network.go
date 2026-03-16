@@ -11,10 +11,11 @@ import (
 
 // NetworkConfig represents the desired network configuration.
 type NetworkConfig struct {
-	Mode    string `json:"mode"`    // "dhcp" or "static"
-	Address string `json:"address"` // CIDR notation, e.g. "192.168.1.100/24"
+	Mode    string `json:"mode"`          // "dhcp" or "static"
+	Address string `json:"address"`       // CIDR notation, e.g. "192.168.1.100/24"
 	Gateway string `json:"gateway"`
-	DNS     string `json:"dns"` // comma-separated DNS servers
+	DNS     string `json:"dns"`           // comma-separated DNS servers
+	VLAN    int    `json:"vlan,omitempty"` // 0 = no VLAN
 }
 
 // NetworkStatus represents the current network state.
@@ -24,6 +25,7 @@ type NetworkStatus struct {
 	Address   string `json:"address"`
 	Gateway   string `json:"gateway"`
 	DNS       string `json:"dns"`
+	VLAN      int    `json:"vlan,omitempty"`
 }
 
 // LoadNetworkConfig reads the saved network configuration from disk.
@@ -74,11 +76,17 @@ func GetNetworkStatus() (*NetworkStatus, error) {
 		Address:   addr,
 		Gateway:   gw,
 		DNS:       dns,
+		VLAN:      saved.VLAN,
 	}, nil
 }
 
 // ApplyNetworkConfig writes the network configuration and applies it.
 func ApplyNetworkConfig(cfg *NetworkConfig) error {
+	// Validate VLAN ID if set
+	if cfg.VLAN < 0 || cfg.VLAN > 4094 {
+		return fmt.Errorf("invalid VLAN ID %d: must be 1-4094", cfg.VLAN)
+	}
+
 	if err := storage.WriteJSON(storage.NetworkFile(), cfg); err != nil {
 		return fmt.Errorf("save network config: %w", err)
 	}
@@ -88,10 +96,43 @@ func ApplyNetworkConfig(cfg *NetworkConfig) error {
 		return fmt.Errorf("find interface: %w", err)
 	}
 
+	// Set up VLAN sub-interface if configured
+	if cfg.VLAN > 0 {
+		vlanIface := fmt.Sprintf("%s.%d", iface, cfg.VLAN)
+		if err := setupVLAN(iface, vlanIface, cfg.VLAN); err != nil {
+			return fmt.Errorf("setup VLAN: %w", err)
+		}
+		iface = vlanIface
+	}
+
 	if cfg.Mode == "dhcp" {
 		return applyDHCP(iface)
 	}
 	return applyStatic(iface, cfg)
+}
+
+// setupVLAN loads the 8021q module and creates a VLAN sub-interface.
+func setupVLAN(baseIface, vlanIface string, vlanID int) error {
+	// Load 802.1Q kernel module
+	if err := exec.Command("modprobe", "8021q").Run(); err != nil {
+		return fmt.Errorf("modprobe 8021q: %w", err)
+	}
+
+	// Remove existing VLAN interface if present (ignore errors)
+	exec.Command("ip", "link", "delete", vlanIface).Run()
+
+	// Create VLAN sub-interface
+	if err := exec.Command("ip", "link", "add", "link", baseIface,
+		"name", vlanIface, "type", "vlan", "id", fmt.Sprintf("%d", vlanID)).Run(); err != nil {
+		return fmt.Errorf("create VLAN interface %s: %w", vlanIface, err)
+	}
+
+	// Bring it up
+	if err := exec.Command("ip", "link", "set", vlanIface, "up").Run(); err != nil {
+		return fmt.Errorf("bring up %s: %w", vlanIface, err)
+	}
+
+	return nil
 }
 
 func findDefaultInterface() (string, error) {

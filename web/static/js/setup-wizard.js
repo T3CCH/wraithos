@@ -709,6 +709,11 @@ async function renderStepNetwork(body,footer){
       <input class="form-input" id="wiz-net-dns" placeholder="8.8.8.8, 1.1.1.1" value="${esc((n.dns||[]).join(', '))}">
       <div class="form-hint">Comma-separated</div></div>
   </div>
+</div>
+<div class="form-group" style="margin-top:16px;max-width:200px">
+  <label class="form-label">VLAN ID <span class="dim">(optional)</span></label>
+  <input class="form-input" id="wiz-net-vlan" type="number" min="1" max="4094" placeholder="None" value="${n.vlan||''}">
+  <div class="form-hint">Leave blank for no VLAN tagging</div>
 </div>`;
     }
   }catch(e){
@@ -732,6 +737,8 @@ window.wizardSaveNetwork=async function(){
     body.gateway=$('#wiz-net-gw').value;
     body.dns=$('#wiz-net-dns').value.split(',').map(s=>s.trim()).filter(Boolean);
   }
+  const vlan=parseInt($('#wiz-net-vlan').value)||0;
+  body.vlan=vlan;
   const btn=$('#btn-save-net');
   if(btn){btn.disabled=true;btn.innerHTML='<span class="spinner"></span> Saving...';}
   try{
@@ -830,7 +837,9 @@ function renderStepSummary(body,footer){
     if(r.migratedFiles&&r.migratedFiles.length)summaryItems.push(`Migrated files: ${r.migratedFiles.join(', ')}`);
   }
   if(wizState.networkData){
-    summaryItems.push(`Network: ${wizState.networkData.dhcp?'DHCP':'Static IP'}`);
+    let netSummary=`Network: ${wizState.networkData.dhcp?'DHCP':'Static IP'}`;
+    if(wizState.networkData.vlan)netSummary+=` (VLAN ${wizState.networkData.vlan})`;
+    summaryItems.push(netSummary);
   }
   if(wizState.timezone!=='UTC'){
     summaryItems.push(`Timezone: ${wizState.timezone}`);

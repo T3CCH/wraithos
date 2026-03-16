@@ -1,0 +1,851 @@
+#!/bin/sh
+# wraith-setup - Console-based setup wizard for WraithOS
+#
+# Provides a text-based interactive menu for configuring WraithOS
+# from the console/TTY. Useful when the web UI is unreachable
+# (e.g., no DHCP on the network).
+#
+# Usage: wraith-setup
+#
+# Requirements:
+#   - POSIX sh (busybox ash compatible)
+#   - No external dependencies (no dialog, whiptail, ncurses, jq)
+
+# Load wraith configuration
+if [ -f /etc/conf.d/wraith ]; then
+    . /etc/conf.d/wraith
+fi
+
+CONFIG_DIR="${WRAITH_CONFIG_DIR:-/wraith/config}"
+IFACE="${WRAITH_NET_INTERFACE:-eth0}"
+UI_PORT="${WRAITH_UI_PORT:-82}"
+NET_CONFIG="$CONFIG_DIR/network.json"
+
+# --- Color helpers ---
+C_RESET="\033[0m"
+C_BOLD="\033[1m"
+C_DIM="\033[2m"
+C_GREEN="\033[32m"
+C_YELLOW="\033[33m"
+C_CYAN="\033[36m"
+C_RED="\033[31m"
+C_WHITE="\033[97m"
+
+# --- JSON helpers (no jq, busybox-safe) ---
+# These match the pattern used by wraith-network init script.
+
+# Parse a JSON string value. Args: file key
+json_value() {
+    sed -n "s/.*\"${2}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$1" | head -1
+}
+
+# Parse a JSON numeric value. Args: file key
+json_number() {
+    sed -n "s/.*\"${2}\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$1" | head -1
+}
+
+# --- Display helpers ---
+
+clear_screen() {
+    printf '\033[2J\033[H'
+}
+
+print_header() {
+    printf "${C_BOLD}${C_WHITE}"
+    printf "  =========================================\n"
+    printf "    WraithOS Console Setup\n"
+    printf "  =========================================\n"
+    printf "${C_RESET}\n"
+}
+
+print_sub_header() {
+    printf "${C_BOLD}${C_WHITE}"
+    printf "  =========================================\n"
+    printf "    %s\n" "$1"
+    printf "  =========================================\n"
+    printf "${C_RESET}\n"
+}
+
+print_line() {
+    printf "  %s\n" "$1"
+}
+
+print_label_value() {
+    printf "  ${C_DIM}%-14s${C_RESET} %s\n" "$1" "$2"
+}
+
+print_menu_item() {
+    printf "  ${C_CYAN}%s${C_RESET}) %s\n" "$1" "$2"
+}
+
+print_success() {
+    printf "\n  ${C_GREEN}%s${C_RESET}\n" "$1"
+}
+
+print_error() {
+    printf "\n  ${C_RED}%s${C_RESET}\n" "$1"
+}
+
+print_warn() {
+    printf "\n  ${C_YELLOW}%s${C_RESET}\n" "$1"
+}
+
+prompt() {
+    printf "\n  ${C_BOLD}%s${C_RESET} " "$1"
+}
+
+# Read a value with a default. Args: prompt_text default_value
+read_with_default() {
+    if [ -n "$2" ]; then
+        printf "  %s [%s]: " "$1" "$2"
+    else
+        printf "  %s: " "$1"
+    fi
+    read -r _input
+    if [ -z "$_input" ]; then
+        _input="$2"
+    fi
+}
+
+press_enter() {
+    printf "\n  ${C_DIM}Press Enter to continue...${C_RESET}"
+    read -r _dummy
+}
+
+# --- Network status helpers ---
+
+# Get the active interface (respects VLAN config)
+get_active_iface() {
+    _active_iface="$IFACE"
+    if [ -f "$NET_CONFIG" ]; then
+        _vlan=$(json_number "$NET_CONFIG" "vlan")
+        if [ -n "$_vlan" ] && [ "$_vlan" -gt 0 ] 2>/dev/null; then
+            _active_iface="${IFACE}.${_vlan}"
+        fi
+    fi
+}
+
+# Get the current IP address on the active interface
+get_current_ip() {
+    get_active_iface
+    _current_ip=$(ip -4 addr show "$_active_iface" 2>/dev/null \
+        | grep -o 'inet [0-9./]*' \
+        | awk '{print $2}' \
+        | head -1)
+    if [ -z "$_current_ip" ]; then
+        _current_ip="not configured"
+    fi
+}
+
+# Get the current gateway
+get_current_gateway() {
+    _current_gw=$(ip route 2>/dev/null | grep '^default' | awk '{print $3}' | head -1)
+    if [ -z "$_current_gw" ]; then
+        _current_gw="none"
+    fi
+}
+
+# Get current DNS servers
+get_current_dns() {
+    _current_dns=""
+    if [ -f /etc/resolv.conf ]; then
+        _current_dns=$(grep '^nameserver' /etc/resolv.conf \
+            | awk '{print $2}' \
+            | tr '\n' ',' \
+            | sed 's/,$//' \
+            | sed 's/,/, /g')
+    fi
+    if [ -z "$_current_dns" ]; then
+        _current_dns="none"
+    fi
+}
+
+# Get current network mode from config
+get_current_mode() {
+    _current_mode="dhcp"
+    if [ -f "$NET_CONFIG" ]; then
+        _mode=$(json_value "$NET_CONFIG" "mode")
+        if [ -n "$_mode" ]; then
+            _current_mode="$_mode"
+        fi
+    fi
+}
+
+# Get current VLAN from config
+get_current_vlan() {
+    _current_vlan=""
+    if [ -f "$NET_CONFIG" ]; then
+        _v=$(json_number "$NET_CONFIG" "vlan")
+        if [ -n "$_v" ] && [ "$_v" -gt 0 ] 2>/dev/null; then
+            _current_vlan="$_v"
+        fi
+    fi
+    if [ -z "$_current_vlan" ]; then
+        _current_vlan="None"
+    fi
+}
+
+# Check if the web UI is responding
+check_webui() {
+    if curl -sf -o /dev/null "http://localhost:${UI_PORT}/api/health" 2>/dev/null; then
+        _webui_status="running on port ${UI_PORT}"
+    elif curl -sf -o /dev/null "http://localhost:${UI_PORT}/" 2>/dev/null; then
+        _webui_status="running on port ${UI_PORT}"
+    else
+        _webui_status="not running"
+    fi
+}
+
+# --- JSON builder (no jq) ---
+# Build network.json content from variables.
+# Uses global vars: _cfg_mode, _cfg_address, _cfg_gateway, _cfg_dns, _cfg_vlan
+build_network_json() {
+    _json="{\n"
+    _json="${_json}    \"mode\": \"${_cfg_mode}\""
+
+    if [ "$_cfg_mode" = "static" ]; then
+        _json="${_json},\n    \"address\": \"${_cfg_address}\""
+        if [ -n "$_cfg_gateway" ]; then
+            _json="${_json},\n    \"gateway\": \"${_cfg_gateway}\""
+        fi
+        if [ -n "$_cfg_dns" ]; then
+            _json="${_json},\n    \"dns\": \"${_cfg_dns}\""
+        fi
+    fi
+
+    if [ -n "$_cfg_vlan" ] && [ "$_cfg_vlan" != "None" ] && [ "$_cfg_vlan" -gt 0 ] 2>/dev/null; then
+        _json="${_json},\n    \"vlan\": ${_cfg_vlan}"
+    fi
+
+    _json="${_json}\n}"
+    printf "%b" "$_json"
+}
+
+# --- Network configuration ---
+
+apply_network_config() {
+    _json_body=$(build_network_json)
+
+    # Ensure config directory exists
+    mkdir -p "$CONFIG_DIR" 2>/dev/null
+
+    # Write config file
+    printf "%b\n" "$_json_body" > "$NET_CONFIG"
+
+    if [ $? -ne 0 ]; then
+        print_error "Failed to write network configuration."
+        return 1
+    fi
+
+    # Restart the network service
+    if [ -x /etc/init.d/wraith-network ]; then
+        printf "\n  Applying network configuration...\n"
+        /etc/init.d/wraith-network restart 2>&1 | while read -r line; do
+            printf "  %s\n" "$line"
+        done
+
+        # Update the console banner
+        if [ -x /etc/local.d/wraith-issue.start ]; then
+            /etc/local.d/wraith-issue.start 2>/dev/null
+        fi
+
+        # Brief pause then show result
+        sleep 2
+        get_current_ip
+        if [ "$_current_ip" != "not configured" ]; then
+            print_success "Network configured: $_current_ip"
+        else
+            print_warn "Network configured but no IP address detected yet."
+            print_line "It may take a moment for DHCP to complete."
+        fi
+    else
+        print_warn "Network service not found. Config saved but not applied."
+        print_line "Restart manually: /etc/init.d/wraith-network restart"
+    fi
+
+    return 0
+}
+
+menu_configure_static() {
+    clear_screen
+    print_sub_header "Configure Static IP"
+
+    # Load current values for defaults
+    get_current_ip
+    get_current_gateway
+    get_current_dns
+
+    # Strip CIDR from IP for display default
+    _default_ip=$(echo "$_current_ip" | sed 's|/.*||')
+    _default_cidr=$(echo "$_current_ip" | grep '/' | sed 's|.*/|/|')
+    if [ -z "$_default_cidr" ]; then
+        _default_cidr="/24"
+    fi
+    _default_gw="$_current_gw"
+    if [ "$_default_gw" = "none" ]; then
+        _default_gw=""
+    fi
+    _default_dns="$_current_dns"
+    if [ "$_default_dns" = "none" ]; then
+        _default_dns="8.8.8.8"
+    fi
+
+    printf "\n"
+    read_with_default "IP Address" "$_default_ip"
+    _new_ip="$_input"
+
+    if [ -z "$_new_ip" ]; then
+        print_error "IP address is required."
+        press_enter
+        return
+    fi
+
+    read_with_default "Subnet (CIDR notation, e.g. /24)" "$_default_cidr"
+    _new_cidr="$_input"
+
+    # Ensure CIDR starts with /
+    case "$_new_cidr" in
+        /*) ;;
+        *)  _new_cidr="/${_new_cidr}" ;;
+    esac
+
+    read_with_default "Gateway" "$_default_gw"
+    _new_gw="$_input"
+
+    read_with_default "DNS Servers (comma-separated)" "$_default_dns"
+    _new_dns="$_input"
+
+    # Preserve existing VLAN
+    get_current_vlan
+    if [ "$_current_vlan" != "None" ]; then
+        _cfg_vlan="$_current_vlan"
+    else
+        _cfg_vlan=""
+    fi
+
+    _cfg_mode="static"
+    _cfg_address="${_new_ip}${_new_cidr}"
+    _cfg_gateway="$_new_gw"
+    _cfg_dns="$_new_dns"
+
+    printf "\n${C_BOLD}  Configuration to apply:${C_RESET}\n"
+    print_label_value "Mode:" "Static"
+    print_label_value "Address:" "$_cfg_address"
+    print_label_value "Gateway:" "${_cfg_gateway:-none}"
+    print_label_value "DNS:" "${_cfg_dns:-none}"
+    if [ -n "$_cfg_vlan" ] && [ "$_cfg_vlan" != "None" ]; then
+        print_label_value "VLAN:" "$_cfg_vlan"
+    fi
+
+    prompt "Apply? (y/n)"
+    read -r _confirm
+    case "$_confirm" in
+        y|Y|yes|YES)
+            apply_network_config
+            ;;
+        *)
+            print_line "Cancelled."
+            ;;
+    esac
+
+    press_enter
+}
+
+menu_configure_dhcp() {
+    clear_screen
+    print_sub_header "Switch to DHCP"
+
+    # Preserve existing VLAN
+    get_current_vlan
+    if [ "$_current_vlan" != "None" ]; then
+        _cfg_vlan="$_current_vlan"
+    else
+        _cfg_vlan=""
+    fi
+
+    _cfg_mode="dhcp"
+    _cfg_address=""
+    _cfg_gateway=""
+    _cfg_dns=""
+
+    printf "\n"
+    printf "  ${C_BOLD}Configuration to apply:${C_RESET}\n"
+    print_label_value "Mode:" "DHCP"
+    if [ -n "$_cfg_vlan" ] && [ "$_cfg_vlan" != "None" ]; then
+        print_label_value "VLAN:" "$_cfg_vlan"
+    fi
+
+    prompt "Apply? (y/n)"
+    read -r _confirm
+    case "$_confirm" in
+        y|Y|yes|YES)
+            apply_network_config
+            ;;
+        *)
+            print_line "Cancelled."
+            ;;
+    esac
+
+    press_enter
+}
+
+menu_configure_vlan() {
+    clear_screen
+    print_sub_header "Configure VLAN"
+
+    get_current_vlan
+    printf "\n"
+    print_label_value "Current VLAN:" "$_current_vlan"
+    printf "\n"
+
+    read_with_default "VLAN ID (1-4094, empty to remove)" ""
+    _new_vlan="$_input"
+
+    if [ -z "$_new_vlan" ]; then
+        _new_vlan="0"
+    fi
+
+    # Validate VLAN ID
+    if [ "$_new_vlan" != "0" ]; then
+        case "$_new_vlan" in
+            *[!0-9]*)
+                print_error "VLAN ID must be a number."
+                press_enter
+                return
+                ;;
+        esac
+        if [ "$_new_vlan" -lt 1 ] || [ "$_new_vlan" -gt 4094 ]; then
+            print_error "VLAN ID must be between 1 and 4094."
+            press_enter
+            return
+        fi
+    fi
+
+    # Reload current full config and update only VLAN
+    get_current_mode
+    _cfg_mode="$_current_mode"
+    _cfg_vlan="$_new_vlan"
+
+    if [ "$_cfg_mode" = "static" ] && [ -f "$NET_CONFIG" ]; then
+        _cfg_address=$(json_value "$NET_CONFIG" "address")
+        _cfg_gateway=$(json_value "$NET_CONFIG" "gateway")
+        _cfg_dns=$(json_value "$NET_CONFIG" "dns")
+    else
+        _cfg_address=""
+        _cfg_gateway=""
+        _cfg_dns=""
+    fi
+
+    if [ "$_new_vlan" = "0" ]; then
+        printf "\n  ${C_BOLD}VLAN will be removed.${C_RESET}\n"
+        _cfg_vlan=""
+    else
+        printf "\n  ${C_BOLD}VLAN will be set to: %s${C_RESET}\n" "$_new_vlan"
+    fi
+
+    prompt "Apply? (y/n)"
+    read -r _confirm
+    case "$_confirm" in
+        y|Y|yes|YES)
+            apply_network_config
+            ;;
+        *)
+            print_line "Cancelled."
+            ;;
+    esac
+
+    press_enter
+}
+
+menu_network() {
+    while true; do
+        clear_screen
+        print_sub_header "Network Configuration"
+
+        get_current_mode
+        get_active_iface
+        get_current_ip
+        get_current_gateway
+        get_current_dns
+        get_current_vlan
+
+        _mode_display=$(echo "$_current_mode" | tr '[:lower:]' '[:upper:]')
+
+        print_label_value "Current Mode:" "$_mode_display"
+        print_label_value "Interface:" "$_active_iface"
+        print_label_value "IP Address:" "$_current_ip"
+        print_label_value "Gateway:" "$_current_gw"
+        print_label_value "DNS:" "$_current_dns"
+        print_label_value "VLAN:" "$_current_vlan"
+
+        printf "\n"
+        print_menu_item "1" "Switch to DHCP"
+        print_menu_item "2" "Configure Static IP"
+        print_menu_item "3" "Configure VLAN"
+        print_menu_item "4" "Back"
+
+        prompt "Choice:"
+        read -r _choice
+        case "$_choice" in
+            1) menu_configure_dhcp ;;
+            2) menu_configure_static ;;
+            3) menu_configure_vlan ;;
+            4|q|Q) return ;;
+            *) ;;
+        esac
+    done
+}
+
+# --- Hostname ---
+
+menu_hostname() {
+    clear_screen
+    print_sub_header "Set Hostname"
+
+    _cur_hostname=$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo "unknown")
+
+    printf "\n"
+    print_label_value "Current:" "$_cur_hostname"
+    printf "\n"
+
+    read_with_default "New hostname" "$_cur_hostname"
+    _new_hostname="$_input"
+
+    if [ -z "$_new_hostname" ]; then
+        print_error "Hostname cannot be empty."
+        press_enter
+        return
+    fi
+
+    if [ "$_new_hostname" = "$_cur_hostname" ]; then
+        print_line "Hostname unchanged."
+        press_enter
+        return
+    fi
+
+    # Validate hostname (alphanumeric, hyphens, no leading/trailing hyphen)
+    case "$_new_hostname" in
+        -* | *- | *[!a-zA-Z0-9-]*)
+            print_error "Invalid hostname. Use only letters, numbers, and hyphens."
+            press_enter
+            return
+            ;;
+    esac
+
+    hostname "$_new_hostname" 2>/dev/null
+    echo "$_new_hostname" > /etc/hostname 2>/dev/null
+
+    # Update /etc/hosts if it exists
+    if [ -f /etc/hosts ]; then
+        # Replace old hostname reference on the 127.0.0.1 line
+        sed -i "s/127\.0\.0\.1.*/127.0.0.1\tlocalhost ${_new_hostname}/" /etc/hosts 2>/dev/null
+    fi
+
+    # Update console banner
+    if [ -x /etc/local.d/wraith-issue.start ]; then
+        /etc/local.d/wraith-issue.start 2>/dev/null
+    fi
+
+    print_success "Hostname set to: $_new_hostname"
+    press_enter
+}
+
+# --- Timezone ---
+
+menu_timezone() {
+    clear_screen
+    print_sub_header "Set Timezone"
+
+    _cur_tz="UTC"
+    if [ -f /etc/timezone ]; then
+        _cur_tz=$(cat /etc/timezone)
+    fi
+
+    printf "\n"
+    print_label_value "Current:" "$_cur_tz"
+    printf "\n"
+
+    # Check if zoneinfo is available
+    if [ ! -d /usr/share/zoneinfo ]; then
+        print_error "Timezone data not installed (tzdata package missing)."
+        press_enter
+        return
+    fi
+
+    # List regions
+    printf "  ${C_BOLD}Select a region:${C_RESET}\n\n"
+
+    _regions=""
+    _count=0
+    for _dir in /usr/share/zoneinfo/*/; do
+        _region=$(basename "$_dir")
+        # Skip non-region directories
+        case "$_region" in
+            posix|right|Etc|SystemV) continue ;;
+        esac
+        _count=$((_count + 1))
+        _regions="${_regions}${_region}\n"
+        printf "  ${C_CYAN}%2d${C_RESET}) %s\n" "$_count" "$_region"
+    done
+
+    # Add UTC as an option
+    _count=$((_count + 1))
+    printf "  ${C_CYAN}%2d${C_RESET}) UTC\n" "$_count"
+    _utc_num="$_count"
+
+    prompt "Region (number or q to cancel):"
+    read -r _region_choice
+
+    case "$_region_choice" in
+        q|Q) return ;;
+    esac
+
+    # Validate numeric
+    case "$_region_choice" in
+        *[!0-9]*|"")
+            print_error "Invalid selection."
+            press_enter
+            return
+            ;;
+    esac
+
+    if [ "$_region_choice" = "$_utc_num" ]; then
+        _selected_tz="UTC"
+    else
+        # Map number back to region name
+        _sel_region=$(printf "%b" "$_regions" | sed -n "${_region_choice}p")
+        if [ -z "$_sel_region" ]; then
+            print_error "Invalid selection."
+            press_enter
+            return
+        fi
+
+        # List cities in region
+        clear_screen
+        print_sub_header "Set Timezone"
+        printf "  ${C_BOLD}Select a city in ${_sel_region}:${C_RESET}\n\n"
+
+        _cities=""
+        _city_count=0
+        for _file in /usr/share/zoneinfo/"$_sel_region"/*; do
+            if [ -f "$_file" ]; then
+                _city=$(basename "$_file")
+                _city_count=$((_city_count + 1))
+                _cities="${_cities}${_city}\n"
+                printf "  ${C_CYAN}%2d${C_RESET}) %s\n" "$_city_count" "$_city"
+            fi
+        done
+
+        if [ "$_city_count" -eq 0 ]; then
+            print_error "No cities found in $_sel_region."
+            press_enter
+            return
+        fi
+
+        prompt "City (number or q to cancel):"
+        read -r _city_choice
+
+        case "$_city_choice" in
+            q|Q) return ;;
+        esac
+
+        case "$_city_choice" in
+            *[!0-9]*|"")
+                print_error "Invalid selection."
+                press_enter
+                return
+                ;;
+        esac
+
+        _sel_city=$(printf "%b" "$_cities" | sed -n "${_city_choice}p")
+        if [ -z "$_sel_city" ]; then
+            print_error "Invalid selection."
+            press_enter
+            return
+        fi
+
+        _selected_tz="${_sel_region}/${_sel_city}"
+    fi
+
+    # Apply timezone
+    if [ -f "/usr/share/zoneinfo/$_selected_tz" ] || [ "$_selected_tz" = "UTC" ]; then
+        ln -sf "/usr/share/zoneinfo/$_selected_tz" /etc/localtime 2>/dev/null
+        echo "$_selected_tz" > /etc/timezone 2>/dev/null
+        print_success "Timezone set to: $_selected_tz"
+    else
+        print_error "Timezone file not found: $_selected_tz"
+    fi
+
+    press_enter
+}
+
+# --- System Status ---
+
+menu_status() {
+    clear_screen
+    print_sub_header "System Status"
+
+    # Hostname
+    _hostname=$(hostname 2>/dev/null || echo "unknown")
+    print_label_value "Hostname:" "$_hostname"
+
+    # Uptime
+    _uptime=$(uptime 2>/dev/null | sed 's/^.*up /up /' | sed 's/,  load.*//')
+    print_label_value "Uptime:" "$_uptime"
+
+    # IP addresses
+    printf "\n  ${C_BOLD}Network Interfaces:${C_RESET}\n"
+    ip -4 addr show 2>/dev/null | grep 'inet ' | while read -r _line; do
+        _addr=$(echo "$_line" | awk '{print $2}')
+        _dev=$(echo "$_line" | awk '{for(i=1;i<=NF;i++) if($i=="dev" || $i=="") next} {print $NF}')
+        # Extract device name properly
+        _dev=$(echo "$_line" | grep -o 'dev [^ ]*' | awk '{print $2}')
+        if [ -n "$_dev" ]; then
+            printf "    %-12s %s\n" "$_dev" "$_addr"
+        fi
+    done
+
+    # Disk status
+    printf "\n  ${C_BOLD}Storage:${C_RESET}\n"
+
+    _config_mount=$(mount 2>/dev/null | grep '/wraith/config' | head -1)
+    if [ -n "$_config_mount" ]; then
+        _config_type=$(echo "$_config_mount" | awk '{print $5}')
+        case "$_config_type" in
+            tmpfs|ramfs)
+                printf "    %-12s %s ${C_YELLOW}(temporary - will not survive reboot)${C_RESET}\n" "Config:" "tmpfs"
+                ;;
+            *)
+                _config_dev=$(echo "$_config_mount" | awk '{print $1}')
+                _config_size=$(df -h /wraith/config 2>/dev/null | tail -1 | awk '{print $2 " (" $5 " used)"}')
+                printf "    %-12s %s %s\n" "Config:" "$_config_dev" "$_config_size"
+                ;;
+        esac
+    else
+        printf "    %-12s %s\n" "Config:" "not mounted"
+    fi
+
+    _cache_mount=$(mount 2>/dev/null | grep '/wraith/cache' | head -1)
+    if [ -n "$_cache_mount" ]; then
+        _cache_type=$(echo "$_cache_mount" | awk '{print $5}')
+        case "$_cache_type" in
+            tmpfs|ramfs)
+                printf "    %-12s %s ${C_YELLOW}(temporary - will not survive reboot)${C_RESET}\n" "Cache:" "tmpfs"
+                ;;
+            *)
+                _cache_dev=$(echo "$_cache_mount" | awk '{print $1}')
+                _cache_size=$(df -h /wraith/cache 2>/dev/null | tail -1 | awk '{print $2 " (" $5 " used)"}')
+                printf "    %-12s %s %s\n" "Cache:" "$_cache_dev" "$_cache_size"
+                ;;
+        esac
+    else
+        printf "    %-12s %s\n" "Cache:" "not mounted"
+    fi
+
+    # Docker status
+    printf "\n  ${C_BOLD}Services:${C_RESET}\n"
+
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        _containers=$(docker ps -q 2>/dev/null | wc -l | tr -d ' ')
+        printf "    %-12s ${C_GREEN}running${C_RESET} (%s container%s)\n" "Docker:" "$_containers" "$([ "$_containers" = "1" ] && echo "" || echo "s")"
+    else
+        printf "    %-12s ${C_RED}not running${C_RESET}\n" "Docker:"
+    fi
+
+    # Web UI status
+    check_webui
+    if [ "$_webui_status" = "not running" ]; then
+        printf "    %-12s ${C_RED}%s${C_RESET}\n" "Web UI:" "$_webui_status"
+    else
+        printf "    %-12s ${C_GREEN}%s${C_RESET}\n" "Web UI:" "$_webui_status"
+    fi
+
+    # SSH status
+    if [ -f /var/run/sshd.pid ] && kill -0 "$(cat /var/run/sshd.pid 2>/dev/null)" 2>/dev/null; then
+        printf "    %-12s ${C_GREEN}running${C_RESET}\n" "SSH:"
+    elif pgrep -x sshd >/dev/null 2>&1; then
+        printf "    %-12s ${C_GREEN}running${C_RESET}\n" "SSH:"
+    else
+        printf "    %-12s ${C_DIM}not running${C_RESET}\n" "SSH:"
+    fi
+
+    # Timezone
+    _tz="UTC"
+    if [ -f /etc/timezone ]; then
+        _tz=$(cat /etc/timezone)
+    fi
+    printf "\n"
+    print_label_value "Timezone:" "$_tz"
+    print_label_value "Date:" "$(date 2>/dev/null)"
+
+    press_enter
+}
+
+# --- Reboot ---
+
+menu_reboot() {
+    prompt "Reboot now? (y/n)"
+    read -r _confirm
+    case "$_confirm" in
+        y|Y|yes|YES)
+            printf "\n  Rebooting...\n"
+            sync
+            reboot
+            ;;
+        *)
+            print_line "Cancelled."
+            ;;
+    esac
+}
+
+# --- Main menu ---
+
+main_menu() {
+    while true; do
+        clear_screen
+        print_header
+
+        # Show quick status summary
+        get_current_ip
+        _hostname=$(hostname 2>/dev/null || echo "unknown")
+        check_webui
+
+        print_label_value "Current IP:" "$_current_ip"
+        print_label_value "Hostname:" "$_hostname"
+        if [ "$_webui_status" = "not running" ]; then
+            printf "  ${C_DIM}%-14s${C_RESET} ${C_RED}%s${C_RESET}\n" "Status:" "Web UI $_webui_status"
+        else
+            printf "  ${C_DIM}%-14s${C_RESET} ${C_GREEN}Web UI %s${C_RESET}\n" "Status:" "$_webui_status"
+        fi
+
+        printf "\n"
+        print_menu_item "1" "Network Configuration"
+        print_menu_item "2" "Set Hostname"
+        print_menu_item "3" "Set Timezone"
+        print_menu_item "4" "View System Status"
+        print_menu_item "5" "Reboot"
+        print_menu_item "q" "Exit"
+
+        prompt "Choice:"
+        read -r _choice
+        case "$_choice" in
+            1) menu_network ;;
+            2) menu_hostname ;;
+            3) menu_timezone ;;
+            4) menu_status ;;
+            5) menu_reboot ;;
+            q|Q) printf "\n"; exit 0 ;;
+            *) ;;
+        esac
+    done
+}
+
+# --- Entry point ---
+
+# Require root
+if [ "$(id -u)" -ne 0 ]; then
+    printf "Error: wraith-setup must be run as root.\n" >&2
+    exit 1
+fi
+
+main_menu

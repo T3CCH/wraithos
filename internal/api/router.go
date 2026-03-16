@@ -116,6 +116,14 @@ func (s *Server) registerRoutes(staticFS http.FileSystem) {
 	s.Mux.HandleFunc("GET /api/system/disks/expandable", s.requireAuth(s.handleExpandableDisks))
 	s.Mux.HandleFunc("POST /api/system/disks/expand", s.requireAuth(s.handleExpandDisk))
 
+	// Docker network management endpoints
+	s.Mux.HandleFunc("GET /api/docker/networks", s.requireAuth(s.handleDockerNetworkList))
+	s.Mux.HandleFunc("POST /api/docker/networks", s.requireAuth(s.handleDockerNetworkCreate))
+	s.Mux.HandleFunc("DELETE /api/docker/networks", s.requireAuth(s.handleDockerNetworkDelete))
+
+	// Docker system prune endpoint
+	s.Mux.HandleFunc("POST /api/docker/prune", s.requireAuth(s.handleDockerPrune))
+
 	// File manager endpoints
 	s.Mux.HandleFunc("GET /api/files/roots", s.requireAuth(s.handleFileRoots))
 	s.Mux.HandleFunc("GET /api/files/list", s.requireAuth(s.handleFileList))

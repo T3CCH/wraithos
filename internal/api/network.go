@@ -15,6 +15,7 @@ type networkGetResponse struct {
 	DHCP      bool     `json:"dhcp"`
 	Interface string   `json:"interface"`
 	Mask      string   `json:"mask"`
+	VLAN      int      `json:"vlan,omitempty"`
 }
 
 // handleNetworkGet returns the current network configuration
@@ -31,6 +32,7 @@ func (s *Server) handleNetworkGet(w http.ResponseWriter, r *http.Request) {
 		Gateway:   status.Gateway,
 		DHCP:      status.Mode == "dhcp",
 		Interface: status.Interface,
+		VLAN:      status.VLAN,
 	}
 
 	if status.DNS != "" {
@@ -55,6 +57,7 @@ type networkSetRequest struct {
 	Mask    string   `json:"mask"`
 	Gateway string   `json:"gateway"`
 	DNS     []string `json:"dns"`
+	VLAN    int      `json:"vlan"`
 }
 
 // handleNetworkSet applies a new network configuration.
@@ -69,6 +72,7 @@ func (s *Server) handleNetworkSet(w http.ResponseWriter, r *http.Request) {
 	cfg := system.NetworkConfig{
 		Gateway: req.Gateway,
 		DNS:     strings.Join(req.DNS, ","),
+		VLAN:    req.VLAN,
 	}
 
 	if req.DHCP {

@@ -546,6 +546,15 @@ select.form-input{appearance:none;background-image:url("data:image/svg+xml,%3Csv
 .fb-empty{text-align:center;padding:32px!important;color:var(--tx-d);font-size:.88rem}
 .fb-error{color:var(--red)}
 
+/* Bulk actions toolbar */
+.fb-bulk-bar{display:flex;align-items:center;gap:8px;padding:8px 14px;margin-bottom:12px;
+  background:var(--ac-glow);border:1px solid var(--ac-glow2);border-radius:var(--r-md);
+  animation:fadeIn 200ms var(--ease)}
+.fb-bulk-count{font-size:.82rem;font-weight:600;color:var(--ac);font-family:var(--mono);margin-right:8px}
+
+/* Copy/Move modal folder list hover */
+.copy-modal-dir:hover{background:var(--bg-card-h)!important}
+
 .fi{font-size:1.1rem;line-height:1;flex-shrink:0;display:inline-flex;align-items:center}
 .fi-dir{color:var(--yel)}
 .fi-video{color:#e879f9}

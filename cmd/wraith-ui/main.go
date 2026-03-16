@@ -82,6 +82,10 @@ func main() {
 	system.StartSSHIfEnabled()
 	logCollector.Info("system", "SSH auto-start check complete")
 
+	// Start mount watchdog for docker-required mounts
+	mountWatchdog := system.NewMountWatchdog(sambaMgr, logCollector)
+	mountWatchdog.Start()
+
 	// Prepare embedded static filesystem
 	// The embed.FS has paths like "web/static/index.html", so we strip the prefix.
 	staticFS, err := fs.Sub(wraithui.StaticFiles, "web/static")
@@ -146,6 +150,8 @@ func main() {
 
 	log.Printf("received %v, shutting down", sig)
 	logCollector.Info("system", "shutting down (signal: %v)", sig)
+
+	mountWatchdog.Stop()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

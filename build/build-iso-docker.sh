@@ -8,7 +8,7 @@
 
 set -eu
 
-VERSION="0.3.2"
+VERSION=$(cat /build/os/rootfs/usr/share/wraithos/version 2>/dev/null || echo "0.0.0-dev")
 ALPINE_MIRROR="https://dl-cdn.alpinelinux.org/alpine"
 ALPINE_BRANCH="v3.21"
 ARCH="x86_64"
