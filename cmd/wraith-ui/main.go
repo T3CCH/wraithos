@@ -26,7 +26,7 @@ import (
 	"github.com/wraithos/wraith-ui/internal/system"
 )
 
-var version = "0.4.0"
+var version = "0.4.14"
 
 func main() {
 	port := flag.Int("port", 82, "HTTP listen port")
