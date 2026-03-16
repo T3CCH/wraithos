@@ -100,6 +100,18 @@ func stackEnvFile(name string) string {
 	return filepath.Join(stackDir(name), ".env")
 }
 
+// composeBaseArgs returns the common docker compose arguments for a stack,
+// including -f, -p, --project-directory, and --env-file (if .env exists).
+func composeBaseArgs(name string) []string {
+	args := []string{"compose", "-f", stackComposeFile(name),
+		"-p", name, "--project-directory", stackDir(name)}
+	envFile := stackEnvFile(name)
+	if _, err := os.Stat(envFile); err == nil {
+		args = append(args, "--env-file", envFile)
+	}
+	return args
+}
+
 // stacksConfigFile returns the path to stacks.json.
 func stacksConfigFile() string {
 	return filepath.Join(storage.ConfigBase, "stacks.json")
@@ -175,9 +187,8 @@ func (sm *StackManager) getStackStatus(ctx context.Context, name string) StackSt
 		Containers: []ContainerStatus{},
 	}
 
-	composeFile := stackComposeFile(name)
-	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composeFile,
-		"-p", name, "--project-directory", stackDir(name), "ps", "--format", "json")
+	psArgs := append(composeBaseArgs(name), "ps", "--format", "json")
+	cmd := exec.CommandContext(ctx, "docker", psArgs...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		status.Status = "stopped"
@@ -301,10 +312,9 @@ func (sm *StackManager) DeleteStack(ctx context.Context, name string) error {
 	}
 
 	// Try to stop the stack first (ignore errors, it may not be running)
-	composeFile := stackComposeFile(name)
-	if storage.Exists(composeFile) {
-		cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composeFile,
-			"-p", name, "--project-directory", dir, "down", "--remove-orphans")
+	if storage.Exists(stackComposeFile(name)) {
+		downArgs := append(composeBaseArgs(name), "down", "--remove-orphans")
+		cmd := exec.CommandContext(ctx, "docker", downArgs...)
 		cmd.CombinedOutput() // ignore errors
 	}
 
@@ -378,8 +388,9 @@ func (sm *StackManager) SaveCompose(name, content string) error {
 		return fmt.Errorf("write compose file: %w", err)
 	}
 
-	// Validate
-	cmd := exec.Command("docker", "compose", "-f", path, "config", "--quiet")
+	// Validate with project-directory and env-file so compose can resolve .env variables
+	validateArgs := append(composeBaseArgs(name), "config", "--quiet")
+	cmd := exec.Command("docker", validateArgs...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("invalid compose file: %s", strings.TrimSpace(string(output)))
@@ -436,11 +447,7 @@ func (sm *StackManager) RunForStack(ctx context.Context, name string, handler Ou
 
 // runForStackNoLock runs compose commands without the atomic lock.
 func (sm *StackManager) runForStackNoLock(ctx context.Context, name string, handler OutputHandler, args ...string) error {
-	composeFile := stackComposeFile(name)
-	dir := stackDir(name)
-
-	fullArgs := []string{"compose", "-f", composeFile, "-p", name, "--project-directory", dir}
-	fullArgs = append(fullArgs, args...)
+	fullArgs := append(composeBaseArgs(name), args...)
 	cmd := exec.CommandContext(ctx, "docker", fullArgs...)
 
 	pr, pw := io.Pipe()
@@ -534,11 +541,7 @@ func (sm *StackManager) RestartContainer(ctx context.Context, containerName stri
 
 // StreamLogs streams compose logs for a stack via a writer.
 func (sm *StackManager) StreamLogs(ctx context.Context, name string, container string, w io.Writer) error {
-	composeFile := stackComposeFile(name)
-	dir := stackDir(name)
-
-	args := []string{"compose", "-f", composeFile, "-p", name, "--project-directory", dir,
-		"logs", "--follow", "--no-color", "--tail", "100"}
+	args := append(composeBaseArgs(name), "logs", "--follow", "--no-color", "--tail", "100")
 	if container != "" && container != "all" {
 		args = append(args, container)
 	}
