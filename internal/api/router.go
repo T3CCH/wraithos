@@ -17,6 +17,7 @@ type Server struct {
 	Auth     *auth.Manager
 	Docker   *docker.Client
 	Compose  *docker.ComposeManager
+	Stacks   *docker.StackManager
 	Samba    *system.SambaManager
 	Logs     *system.LogCollector
 	Version  string
@@ -28,6 +29,7 @@ func NewServer(
 	authMgr *auth.Manager,
 	dockerClient *docker.Client,
 	composeMgr *docker.ComposeManager,
+	stacksMgr *docker.StackManager,
 	sambaMgr *system.SambaManager,
 	logCollector *system.LogCollector,
 	version string,
@@ -37,6 +39,7 @@ func NewServer(
 		Auth:    authMgr,
 		Docker:  dockerClient,
 		Compose: composeMgr,
+		Stacks:  stacksMgr,
 		Samba:   sambaMgr,
 		Logs:    logCollector,
 		Version: version,
@@ -79,6 +82,12 @@ func (s *Server) registerRoutes(staticFS http.FileSystem) {
 	// WebSocket endpoints for compose terminal
 	s.Mux.HandleFunc("/api/compose/terminal", s.requireAuth(s.handleComposeTerminal))
 	s.Mux.HandleFunc("/api/compose/deploy/ws", s.requireAuth(s.handleComposeTerminal))
+
+	// Stack management endpoints (multi-stack docker compose)
+	s.Mux.HandleFunc("GET /api/stacks", s.requireAuth(s.handleStackList))
+	s.Mux.HandleFunc("POST /api/stacks", s.requireAuth(s.handleStackCreate))
+	s.Mux.HandleFunc("POST /api/stacks/container/restart", s.requireAuth(s.handleStackContainerRestart))
+	s.Mux.Handle("/api/stacks/", s.requireAuthHandler(http.HandlerFunc(s.handleStacksRoute)))
 
 	// Mount endpoints (frontend uses /api/mounts)
 	s.Mux.HandleFunc("GET /api/mounts", s.requireAuth(s.handleSambaList))

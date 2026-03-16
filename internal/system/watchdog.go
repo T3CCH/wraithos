@@ -4,15 +4,17 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/wraithos/wraith-ui/internal/docker"
 	"github.com/wraithos/wraith-ui/internal/storage"
 )
 
 // MountWatchdog monitors mounts flagged as "required for Docker" and
 // automatically re-mounts them and restarts the Docker compose stack
-// if they become unmounted.
+// if they become unmounted. Also supports per-stack mount requirements.
 type MountWatchdog struct {
 	samba    *SambaManager
 	logs     *LogCollector
@@ -70,6 +72,7 @@ func (w *MountWatchdog) check() {
 	}
 
 	var remounted []string
+	remountedNames := make(map[string]bool)
 	for _, m := range mounts {
 		if m.Mounted {
 			continue
@@ -85,21 +88,89 @@ func (w *MountWatchdog) check() {
 
 		w.logs.Info("watchdog", "re-mounted %s at %s", m.ID, m.MountPoint)
 		remounted = append(remounted, m.ID)
+		// Extract mount name from path (e.g., /remotemounts/media -> media)
+		mountName := filepath.Base(m.MountPoint)
+		remountedNames[mountName] = true
 	}
 
 	if len(remounted) > 0 {
-		w.logs.Info("watchdog", "re-mounted %d docker-required mount(s), restarting compose stack",
+		w.logs.Info("watchdog", "re-mounted %d docker-required mount(s), restarting affected stacks",
 			len(remounted))
-		w.restartDockerStack()
+		w.restartAffectedStacks(remountedNames)
 	}
 }
 
-// restartDockerStack restarts the docker compose stack using the compose file
-// at the standard path.
-func (w *MountWatchdog) restartDockerStack() {
+// restartAffectedStacks restarts stacks that depend on the given mount names.
+// Falls back to restarting the legacy compose stack if no per-stack config exists.
+func (w *MountWatchdog) restartAffectedStacks(remountedNames map[string]bool) {
+	// Check per-stack mount requirements
+	cfg, err := docker.LoadStacksConfig()
+	if err == nil && len(cfg.Stacks) > 0 {
+		restarted := 0
+		for name, stack := range cfg.Stacks {
+			if len(stack.RequiredMounts) == 0 {
+				continue
+			}
+			// Check if any of this stack's required mounts were just remounted
+			needsRestart := false
+			for _, reqMount := range stack.RequiredMounts {
+				if remountedNames[reqMount] {
+					needsRestart = true
+					break
+				}
+			}
+			if !needsRestart {
+				continue
+			}
+
+			w.logs.Info("watchdog", "restarting stack %s after mount recovery", name)
+			w.restartStack(name)
+			restarted++
+		}
+		if restarted > 0 {
+			w.logs.Info("watchdog", "restarted %d stack(s) after mount recovery", restarted)
+			return
+		}
+	}
+
+	// Fallback: restart legacy compose stack
+	w.restartLegacyStack()
+}
+
+// restartStack restarts a single named stack.
+func (w *MountWatchdog) restartStack(name string) {
+	dir := filepath.Join(storage.AppsDir(), name)
+	composeFile := filepath.Join(dir, "docker-compose.yml")
+
+	if !storage.Exists(composeFile) {
+		w.logs.Warn("watchdog", "stack %s has no compose file, skipping restart", name)
+		return
+	}
+
+	// docker compose down
+	downCmd := exec.Command("docker", "compose", "-f", composeFile, "-p", name,
+		"--project-directory", dir, "down")
+	if output, err := downCmd.CombinedOutput(); err != nil {
+		w.logs.Error("watchdog", "stack %s compose down failed: %s: %v",
+			name, strings.TrimSpace(string(output)), err)
+	}
+
+	// docker compose up -d
+	upCmd := exec.Command("docker", "compose", "-f", composeFile, "-p", name,
+		"--project-directory", dir, "up", "-d", "--remove-orphans")
+	if output, err := upCmd.CombinedOutput(); err != nil {
+		w.logs.Error("watchdog", "stack %s compose up failed: %s: %v",
+			name, strings.TrimSpace(string(output)), err)
+		return
+	}
+
+	w.logs.Info("watchdog", "stack %s restarted after mount recovery", name)
+}
+
+// restartLegacyStack restarts the legacy single compose stack.
+func (w *MountWatchdog) restartLegacyStack() {
 	composeFile := storage.ComposeFile()
 
-	// Check if compose file exists before trying to restart
 	if !storage.Exists(composeFile) {
 		w.logs.Warn("watchdog", "no compose file found, skipping stack restart")
 		return
@@ -110,7 +181,6 @@ func (w *MountWatchdog) restartDockerStack() {
 	if output, err := downCmd.CombinedOutput(); err != nil {
 		w.logs.Error("watchdog", "docker compose down failed: %s: %v",
 			strings.TrimSpace(string(output)), err)
-		// Continue to try 'up' anyway
 	}
 
 	// docker compose up -d

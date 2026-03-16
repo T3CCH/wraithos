@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // SyncConfigFile copies a single file from the RAM config (ConfigBase) to
@@ -32,6 +33,12 @@ func SyncConfigFile(path string) {
 	}
 
 	dest := filepath.Join(ConfigDiskDir, rel)
+
+	// If config and config-disk are the same device (single-disk mode,
+	// or hot-remount after setup), skip — data is already persistent.
+	if sameDevice(ConfigBase, ConfigDiskDir) {
+		return
+	}
 
 	// Ensure destination directory exists
 	destDir := filepath.Dir(dest)
@@ -72,6 +79,15 @@ func SyncAll() error {
 	src := strings.TrimRight(ConfigBase, "/")
 	dst := strings.TrimRight(ConfigDiskDir, "/")
 
+	// If both paths are on the same device (single-disk mode, or after
+	// setup wizard hot-remounts the config disk directly), skip the copy
+	// since data is already on persistent storage. Just flush to disk.
+	if sameDevice(src, dst) {
+		log.Printf("sync-all: config and config-disk are same device, skipping copy")
+		exec.Command("sync").Run()
+		return nil
+	}
+
 	// Remove existing content on the config disk and replace with current
 	// RAM config. This is a two-step process:
 	//   1. Remove old files from the destination (except lost+found)
@@ -104,6 +120,23 @@ func SyncAll() error {
 
 	log.Printf("sync-all: config synced to %s", dst)
 	return nil
+}
+
+// sameDevice returns true if two paths reside on the same filesystem device.
+// This detects when config and config-disk are the same mount (e.g. after the
+// setup wizard hot-remounts, or when both are direct mounts of the same ext4).
+func sameDevice(a, b string) bool {
+	infoA, errA := os.Stat(a)
+	infoB, errB := os.Stat(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	sysA, okA := infoA.Sys().(*syscall.Stat_t)
+	sysB, okB := infoB.Sys().(*syscall.Stat_t)
+	if !okA || !okB {
+		return false
+	}
+	return sysA.Dev == sysB.Dev
 }
 
 // isMounted checks /proc/mounts for an active mount at the given path.

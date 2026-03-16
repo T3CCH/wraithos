@@ -35,10 +35,20 @@ type fileEntry struct {
 }
 
 // getAllowedRoots returns all currently allowed root paths for file browsing.
+// Scoped to /dockerapps (app data) and /remotemounts/* (network shares).
 func (s *Server) getAllowedRoots() []fileRoot {
 	var roots []fileRoot
 
-	// Add mounted Samba/NFS shares
+	// Add /dockerapps as the app data root (always present)
+	appsDir := storage.AppsDir()
+	os.MkdirAll(appsDir, 0755)
+	roots = append(roots, fileRoot{
+		Name: "App Data",
+		Path: appsDir,
+		Type: "local",
+	})
+
+	// Add mounted Samba/NFS shares from /remotemounts
 	mounts, err := s.Samba.ListMounts()
 	if err == nil {
 		for _, m := range mounts {
@@ -46,39 +56,16 @@ func (s *Server) getAllowedRoots() []fileRoot {
 				continue
 			}
 			name := filepath.Base(m.MountPoint)
-			src := fmt.Sprintf("//%s/%s", m.Server, m.Share)
 			mountType := m.Type
 			if mountType == "" {
 				mountType = "cifs"
 			}
-			if mountType == "nfs" {
-				src = fmt.Sprintf("%s:%s", m.Server, m.Share)
-			}
 			roots = append(roots, fileRoot{
-				Name: name + " (" + src + ")",
+				Name: "Remote: " + name,
 				Path: m.MountPoint,
 				Type: mountType,
 			})
 		}
-	}
-
-	// Add Docker compose/config directory as a browsable root
-	composeDir := storage.ComposeDir()
-	if info, err := os.Stat(composeDir); err == nil && info.IsDir() {
-		roots = append(roots, fileRoot{
-			Name: "Docker Config",
-			Path: composeDir,
-			Type: "local",
-		})
-	}
-
-	// Add cache disk root if available (for data migration)
-	if info, err := os.Stat(storage.CacheDisk); err == nil && info.IsDir() {
-		roots = append(roots, fileRoot{
-			Name: "Local Storage",
-			Path: storage.CacheDisk,
-			Type: "local",
-		})
 	}
 
 	return roots

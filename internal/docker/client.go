@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/system"
 	"github.com/docker/docker/client"
@@ -259,6 +260,64 @@ func (c *Client) RemoveNetwork(ctx context.Context, networkID string) error {
 		return fmt.Errorf("remove network: %w", err)
 	}
 	return nil
+}
+
+// ImageInfo holds summary information about a Docker image.
+type ImageInfo struct {
+	ID      string   `json:"id"`
+	Tags    []string `json:"tags"`
+	Size    int64    `json:"size"`
+	Created string   `json:"created"`
+	InUse   bool     `json:"inUse"`
+}
+
+// ListImages returns all Docker images with usage info.
+// Images currently used by any container (running or stopped) are marked as in-use.
+func (c *Client) ListImages(ctx context.Context) ([]ImageInfo, uint64, error) {
+	images, err := c.cli.ImageList(ctx, image.ListOptions{All: false})
+	if err != nil {
+		return nil, 0, fmt.Errorf("list images: %w", err)
+	}
+
+	// Build a set of image IDs currently in use by containers
+	containers, err := c.cli.ContainerList(ctx, container.ListOptions{All: true})
+	if err != nil {
+		return nil, 0, fmt.Errorf("list containers for image usage: %w", err)
+	}
+	usedImages := make(map[string]bool)
+	for _, ctr := range containers {
+		usedImages[ctr.ImageID] = true
+	}
+
+	result := make([]ImageInfo, 0, len(images))
+	var reclaimable uint64
+	for _, img := range images {
+		tags := img.RepoTags
+		if tags == nil {
+			tags = []string{"<none>:<none>"}
+		}
+		inUse := usedImages[img.ID]
+		if !inUse {
+			reclaimable += uint64(img.Size)
+		}
+		result = append(result, ImageInfo{
+			ID:      img.ID,
+			Tags:    tags,
+			Size:    img.Size,
+			Created: time.Unix(img.Created, 0).Format(time.RFC3339),
+			InUse:   inUse,
+		})
+	}
+
+	// Sort: in-use first, then by size descending
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].InUse != result[j].InUse {
+			return result[i].InUse
+		}
+		return result[i].Size > result[j].Size
+	})
+
+	return result, reclaimable, nil
 }
 
 // PruneResult holds the result of a Docker system prune.

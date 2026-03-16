@@ -54,6 +54,7 @@ create_rootfs() {
         curl \
         tzdata \
         mkinitfs \
+        openssh-server \
         xe-guest-utilities \
         open-vm-tools \
         qemu-guest-agent

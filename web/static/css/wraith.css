@@ -109,6 +109,28 @@ ul{list-style:none}
 .stat-bar-fill.warn{background:var(--yel)}.stat-bar-fill.danger{background:var(--red)}
 .stat-detail{margin-top:8px;font-size:.78rem;color:var(--tx-d);font-family:var(--mono)}
 
+/* ============ DASHBOARD STORAGE BARS ============ */
+.dash-storage-item{margin-bottom:12px}
+.dash-storage-item:last-child{margin-bottom:0}
+.dash-storage-label{display:flex;justify-content:space-between;margin-bottom:4px;font-size:.85rem}
+.dash-storage-bar{height:8px;background:var(--bg-inp);border-radius:4px;overflow:hidden}
+.dash-storage-fill{height:100%;border-radius:4px;background:var(--ac);transition:width .3s var(--ease)}
+.dash-storage-fill.warn{background:var(--yel)}
+.dash-storage-fill.danger{background:var(--red)}
+
+/* ============ DASHBOARD DOCKER IMAGES ============ */
+.dash-images-list{display:flex;flex-direction:column;gap:6px}
+.dash-image-row{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;
+  background:var(--bg-inp);border:1px solid var(--bdr);border-radius:var(--r-md);font-size:.85rem;
+  transition:border-color 150ms var(--ease)}
+.dash-image-row:hover{border-color:#3a3a4a}
+.dash-image-unused{border-color:var(--yel-d)}
+.dash-image-tag{font-family:var(--mono);color:var(--tx-d);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%}
+.dash-image-meta{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:.78rem;color:var(--tx-d);flex-shrink:0}
+.dash-image-badge{padding:2px 8px;border-radius:10px;font-size:.68rem;font-weight:500;text-transform:uppercase;letter-spacing:.3px}
+.badge-used{background:var(--grn-d);color:var(--grn)}
+.badge-unused{background:var(--yel-d);color:var(--yel)}
+
 .container-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px;margin-bottom:24px}
 .container-card{background:var(--bg-card);border:1px solid var(--bdr);border-radius:var(--r-lg);
   padding:24px;transition:all 150ms var(--ease);animation:fadeUp 400ms var(--ease) both}
@@ -570,4 +592,39 @@ select.form-input{appearance:none;background-image:url("data:image/svg+xml,%3Csv
   .fb-th-actions,.fb-td-actions{width:auto}
   .fb-table th,.fb-table td{padding:6px 10px}
   .fb-roots{flex-direction:column}
+}
+
+/* ============ STACK CARDS ============ */
+.stack-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
+.stack-card{background:var(--bg-card);border:1px solid var(--bdr);border-radius:var(--r-lg);padding:20px;
+  transition:border-color 150ms,box-shadow 150ms;animation:fadeUp 400ms var(--ease) both}
+.stack-card:hover{border-color:#3a3a4a}
+.stack-card.stack-running{border-left:3px solid var(--grn)}
+.stack-card.stack-stopped{border-left:3px solid var(--red)}
+.stack-card.stack-partial{border-left:3px solid var(--yel)}
+.stack-card-new{border-style:dashed;display:flex;align-items:center;justify-content:center;
+  min-height:140px;cursor:pointer;opacity:.6;transition:all 150ms var(--ease)}
+.stack-card-new:hover{opacity:1;border-color:var(--ac);border-style:dashed}
+.stack-status{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+.stack-actions{display:flex;gap:8px;margin-top:16px}
+
+/* ============ STACK DETAIL TABS ============ */
+.stack-tabs{display:flex;gap:0;border-bottom:1px solid var(--bdr);margin-bottom:24px}
+.stack-tab{padding:8px 20px;cursor:pointer;border-bottom:2px solid transparent;
+  color:var(--tx-d);font-size:.88rem;font-weight:500;transition:all 150ms var(--ease)}
+.stack-tab:hover{color:var(--tx)}
+.stack-tab.active{border-bottom-color:var(--ac);color:var(--ac)}
+
+/* ============ STACK TERMINAL PANEL ============ */
+.stack-terminal{position:fixed;bottom:0;left:0;right:0;max-height:40vh;background:var(--bg-srf);
+  border-top:1px solid var(--bdr);z-index:100;display:flex;flex-direction:column;
+  animation:fadeIn 200ms var(--ease)}
+.stack-terminal-header{display:flex;align-items:center;justify-content:space-between;
+  padding:8px 16px;border-bottom:1px solid var(--bdr);font-size:.82rem;font-weight:600;color:var(--tx-d)}
+.stack-terminal-body{flex:1;overflow-y:auto;padding:12px 16px;font-family:var(--mono);
+  font-size:.8rem;line-height:1.5;color:var(--tx-d);white-space:pre-wrap;max-height:calc(40vh - 40px)}
+
+@media(max-width:768px){
+  .stack-grid{grid-template-columns:1fr}
+  .stack-terminal{max-height:50vh}
 }

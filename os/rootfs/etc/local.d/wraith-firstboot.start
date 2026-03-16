@@ -55,4 +55,14 @@ chmod 700 "$WRAITH_CONFIG_DIR"
 
 # Write sentinel file with timestamp
 date -u '+%Y-%m-%dT%H:%M:%SZ' > "$SENTINEL"
+
+# Sync firstboot files to persistent config disk so they survive
+# hard reboots (where the shutdown sync may not run).
+WRAITH_CONFIG_DISK_DIR="/wraith/config-disk"
+if mountpoint -q "$WRAITH_CONFIG_DISK_DIR" 2>/dev/null; then
+    cp -a "$WRAITH_CONFIG_DIR"/. "$WRAITH_CONFIG_DISK_DIR"/ 2>/dev/null || true
+    sync
+    echo "[wraith-firstboot] Config synced to persistent disk"
+fi
+
 echo "[wraith-firstboot] Initial setup complete"

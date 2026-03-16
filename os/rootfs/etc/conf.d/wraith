@@ -30,4 +30,10 @@ WRAITH_UI_PORT="82"
 WRAITH_UI_BINARY="/usr/bin/wraith-ui"
 
 # Samba mount base directory
-WRAITH_SAMBA_MOUNT_DIR="/mnt"
+WRAITH_SAMBA_MOUNT_DIR="/remotemounts"
+
+# App data directory
+WRAITH_APPS_DIR="/dockerapps"
+
+# Remote mounts base directory
+WRAITH_REMOTE_MOUNTS_DIR="/remotemounts"

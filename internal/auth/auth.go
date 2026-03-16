@@ -26,8 +26,9 @@ const (
 
 // Credentials stored on the config disk.
 type Credentials struct {
-	Username string `json:"username"`
-	Hash     string `json:"hash"`
+	Username   string `json:"username"`
+	Hash       string `json:"hash"`
+	ShadowHash string `json:"shadowHash,omitempty"`
 }
 
 // Session represents an active login session.
@@ -231,11 +232,60 @@ func (m *Manager) ChangePassword(currentPassword, newPassword string) error {
 // This uses chpasswd which is available on Alpine Linux. Returns an error if the
 // sync fails, but callers should treat this as non-fatal (log a warning, don't
 // fail the web password operation).
+//
+// Additionally generates a SHA-512 shadow hash and persists it in the credentials
+// file so that SyncRootPasswordOnBoot can re-apply it after a reboot (WraithOS
+// runs in RAM, so /etc/shadow is rebuilt from the ISO on every boot).
 func SyncRootPassword(password string) error {
 	cmd := exec.Command("chpasswd")
 	cmd.Stdin = strings.NewReader("root:" + password)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("chpasswd: %w (output: %s)", err, strings.TrimSpace(string(output)))
+	}
+
+	// Generate a SHA-512 shadow hash and store it for boot-time re-sync.
+	hashCmd := exec.Command("openssl", "passwd", "-6", "-stdin")
+	hashCmd.Stdin = strings.NewReader(password)
+	hashOut, err := hashCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("openssl passwd: %w (output: %s)", err, strings.TrimSpace(string(hashOut)))
+	}
+	shadowHash := strings.TrimSpace(string(hashOut))
+
+	// Read existing credentials and update the shadow hash field.
+	var creds Credentials
+	if err := storage.ReadJSON(storage.AuthFile(), &creds); err != nil {
+		return fmt.Errorf("read credentials for shadow hash update: %w", err)
+	}
+	creds.ShadowHash = shadowHash
+	if err := storage.WriteJSON(storage.AuthFile(), &creds); err != nil {
+		return fmt.Errorf("write shadow hash: %w", err)
+	}
+
+	return nil
+}
+
+// SyncRootPasswordOnBoot re-applies the root password from the stored shadow hash.
+// Call this at startup so the root password survives reboots on the RAM-based OS.
+// Returns nil if no credentials or no shadow hash exists (nothing to sync).
+func SyncRootPasswordOnBoot() error {
+	if !storage.Exists(storage.AuthFile()) {
+		return nil
+	}
+
+	var creds Credentials
+	if err := storage.ReadJSON(storage.AuthFile(), &creds); err != nil {
+		return fmt.Errorf("read credentials: %w", err)
+	}
+
+	if creds.ShadowHash == "" {
+		return nil
+	}
+
+	cmd := exec.Command("chpasswd", "-e")
+	cmd.Stdin = strings.NewReader("root:" + creds.ShadowHash)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("chpasswd -e: %w (output: %s)", err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }

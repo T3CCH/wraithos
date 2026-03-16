@@ -26,7 +26,7 @@ import (
 	"github.com/wraithos/wraith-ui/internal/system"
 )
 
-var version = "0.4.14"
+var version = "0.4.19"
 
 func main() {
 	port := flag.Int("port", 82, "HTTP listen port")
@@ -45,6 +45,10 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.Printf("WraithOS Management Server v%s starting", version)
 
+	// Ensure app data and remote mounts directories exist
+	os.MkdirAll(storage.AppsDir(), 0755)
+	os.MkdirAll(storage.MountsDir(), 0755)
+
 	// Initialize log collector (1000-entry ring buffer)
 	logCollector := system.NewLogCollector(1000)
 	logCollector.Info("system", "WraithOS v%s starting", version)
@@ -54,6 +58,14 @@ func main() {
 	authMgr.SecureCookies = *tlsCert != "" && *tlsKey != ""
 	if authMgr.NeedsSetup() {
 		logCollector.Info("auth", "first boot detected, setup required")
+	} else {
+		// Re-sync root password from stored shadow hash so it survives reboots.
+		// WraithOS runs in RAM — /etc/shadow is rebuilt from the ISO on every boot.
+		if err := auth.SyncRootPasswordOnBoot(); err != nil {
+			logCollector.Warn("auth", "failed to sync root password on boot: %v", err)
+		} else {
+			logCollector.Info("auth", "root password synced from stored credentials")
+		}
 	}
 
 	// Initialize Docker client
@@ -74,6 +86,9 @@ func main() {
 
 	// Initialize compose manager
 	composeMgr := docker.NewComposeManager()
+
+	// Initialize stack manager for multi-stack support
+	stacksMgr := docker.NewStackManager()
 
 	// Initialize Samba manager
 	sambaMgr := system.NewSambaManager()
@@ -98,6 +113,7 @@ func main() {
 		authMgr,
 		dockerClient,
 		composeMgr,
+		stacksMgr,
 		sambaMgr,
 		logCollector,
 		version,
@@ -120,6 +136,18 @@ func main() {
 		for range ticker.C {
 			authMgr.CleanExpiredSessions()
 			authMgr.CleanLoginAttempts()
+		}
+	}()
+
+	// Periodic config sync to physical disk — belt-and-suspenders for
+	// hard reboots where the shutdown sync may not run.
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			if err := storage.SyncAll(); err != nil {
+				log.Printf("periodic sync failed: %v", err)
+			}
 		}
 	}()
 

@@ -57,6 +57,8 @@ init_cache_layout() {
 
     mkdir -p "$base/docker"
     mkdir -p "$base/mounts"
+    mkdir -p /dockerapps
+    mkdir -p /remotemounts
 }
 
 start() {

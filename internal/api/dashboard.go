@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/wraithos/wraith-ui/internal/docker"
 	"github.com/wraithos/wraith-ui/internal/setup"
 	"github.com/wraithos/wraith-ui/internal/storage"
 	"github.com/wraithos/wraith-ui/internal/system"
@@ -44,9 +45,11 @@ type containerInfo struct {
 }
 
 type dashboardResponse struct {
-	System     systemStats     `json:"system"`
-	Network    networkInfo     `json:"network"`
-	Containers []containerInfo `json:"containers"`
+	System      systemStats      `json:"system"`
+	Network     networkInfo      `json:"network"`
+	Containers  []containerInfo  `json:"containers"`
+	Images      []docker.ImageInfo `json:"images"`
+	Reclaimable uint64           `json:"reclaimable"`
 }
 
 // handleDashboard returns system stats, network info, and container list
@@ -153,6 +156,20 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	if resp.Containers == nil {
 		resp.Containers = []containerInfo{}
+	}
+
+	// Docker images with usage info
+	if s.Docker != nil {
+		images, reclaimable, err := s.Docker.ListImages(r.Context())
+		if err != nil {
+			s.Logs.Warn("dashboard", "failed to list images: %v", err)
+		} else {
+			resp.Images = images
+			resp.Reclaimable = reclaimable
+		}
+	}
+	if resp.Images == nil {
+		resp.Images = []docker.ImageInfo{}
 	}
 
 	writeOK(w, resp)

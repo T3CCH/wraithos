@@ -3,7 +3,7 @@
 const $=(s,p)=>(p||document).querySelector(s);
 const $$=(s,p)=>[...(p||document).querySelectorAll(s)];
 const API='/api';
-let _poll=null,_term=null,_yamlTimer=null,_diskStatus=null;
+let _poll=null,_term=null,_yamlTimer=null,_diskStatus=null,_stackTerm=null,_stackLogWs=null;
 
 async function api(path,opts={}){
   const cfg={headers:{'Content-Type':'application/json',...opts.headers},...opts};
@@ -20,19 +20,22 @@ function toast(msg,type='info'){
   setTimeout(()=>{el.classList.add('toast-exit');setTimeout(()=>el.remove(),200)},3500);
 }
 
-const pages=['dashboard','compose','mounts','files','network','docker-networks','settings'];
+const pages=['dashboard','stacks','compose','mounts','files','network','docker-networks','settings'];
 let cur='dashboard';
 
 function stopPoll(){if(_poll){clearInterval(_poll);_poll=null}}
 function startPoll(fn,ms=5000){stopPoll();fn();_poll=setInterval(fn,ms)}
+
+function _closeStackTerm(){if(_stackTerm){_stackTerm.destroy();_stackTerm=null}if(_stackLogWs){_stackLogWs.close();_stackLogWs=null}const p=$('#stack-terminal-panel');if(p)p.remove()}
 
 window.navigate=function(p){
   if(!pages.includes(p))return;cur=p;
   $$('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.page===p));
   $('#sidebar').classList.remove('open');stopPoll();
   if(p!=='compose'&&_term){_term.destroy();_term=null}
+  if(p!=='stacks')_closeStackTerm();
   const m=$('#main-content');m.style.opacity='0';
-  setTimeout(()=>{({dashboard:pgDash,compose:pgCompose,mounts:pgMounts,files:pgFiles,network:pgNetwork,'docker-networks':pgDockerNetworks,settings:pgSettings}[p]||pgDash)();m.style.opacity='1'},80);
+  setTimeout(()=>{({dashboard:pgDash,stacks:pgStacks,compose:pgCompose,mounts:pgMounts,files:pgFiles,network:pgNetwork,'docker-networks':pgDockerNetworks,settings:pgSettings}[p]||pgDash)();m.style.opacity='1'},80);
 };
 window.toggleSidebar=function(){$('#sidebar').classList.toggle('open')};
 window.logout=async function(){try{await api('/auth/logout',{method:'POST'})}catch{}location.href='/login.html'};
@@ -70,6 +73,12 @@ function pgDash(){
 <button class="btn btn-sm btn-primary" onclick="dashAct('start')" id="btn-start-stack">${ic.play} Start</button>
 </div></div>
 <div class="stats-grid stagger" id="stats-grid">${skel(4)}</div>
+<div class="card animate-up" style="margin-bottom:24px"><div class="card-header"><div class="card-title">Storage</div></div>
+<div id="dash-storage"><div class="skeleton skeleton-text"></div></div></div>
+<div class="card animate-up" style="margin-bottom:24px"><div class="card-header"><div class="card-title">Docker Images</div>
+<button class="btn btn-sm btn-secondary" onclick="dockerPrune()" id="btn-docker-prune">Clean Up</button></div>
+<div id="dash-images"><div class="skeleton skeleton-text"></div></div>
+<div class="dim" style="margin-top:8px;font-size:.82rem" id="dash-reclaimable"></div></div>
 <div class="card" style="margin-bottom:24px"><div class="card-header"><div class="card-title">Network</div></div>
 <div class="network-grid" id="net-grid"><div class="skeleton skeleton-text"></div></div></div>
 <h2 style="font-size:1.1rem;font-weight:600;margin-bottom:16px">Containers</h2>
@@ -82,7 +91,8 @@ function pgDash(){
 async function fetchDash(){
   try{
     const d=await api('/system/status');
-    updStats(d.system||{});updNet(d.network||{});updCont(d.containers||[]);
+    updStats(d.system||{});updStorage(d.system||{});updNet(d.network||{});updCont(d.containers||[]);
+    updImages(d.images||[],d.reclaimable||0);
     if(d.system&&d.system.uptime)$('#topbar-uptime').textContent=fU(d.system.uptime);
   }catch{}
 }
@@ -177,6 +187,46 @@ ${c.state==='running'?`<button class="btn btn-sm btn-secondary" data-cont-action
   g.addEventListener('click',function(e){const btn=e.target.closest('[data-cont-action]');if(btn)contAct(btn.dataset.contName,btn.dataset.contAction)});
 }
 
+function updStorage(s){
+  const el=$('#dash-storage');if(!el)return;
+  const cu=s.configDiskUsed||0,ct=s.configDiskTotal||1,cpp=Math.round(cu/ct*100),
+    du=s.cacheDiskUsed||0,dt=s.cacheDiskTotal||1,dp=Math.round(du/dt*100);
+  el.innerHTML=`<div class="dash-storage-item">
+<div class="dash-storage-label"><span>Config Disk</span><span class="dim">${fB(cu)} / ${fB(ct)} (${cpp}%)</span></div>
+<div class="dash-storage-bar"><div class="dash-storage-fill ${bC(cpp)}" style="width:${cpp}%"></div></div>
+</div>
+<div class="dash-storage-item">
+<div class="dash-storage-label"><span>Cache Disk</span><span class="dim">${fB(du)} / ${fB(dt)} (${dp}%)</span></div>
+<div class="dash-storage-bar"><div class="dash-storage-fill ${bC(dp)}" style="width:${dp}%"></div></div>
+</div>`;
+}
+
+function updImages(imgs,reclaimable){
+  const el=$('#dash-images');if(!el)return;
+  if(!imgs.length){el.innerHTML='<div class="dim" style="font-size:.85rem">No Docker images found.</div>';$('#dash-reclaimable').textContent='';return}
+  el.innerHTML='<div class="dash-images-list">'+imgs.map(img=>{
+    const tag=(img.tags&&img.tags[0])||'<none>';
+    const used=img.inUse;
+    return`<div class="dash-image-row${used?'':' dash-image-unused'}">
+<div class="dash-image-tag">${esc(tag)}</div>
+<div class="dash-image-meta"><span>${fB(img.size)}</span><span class="dash-image-badge ${used?'badge-used':'badge-unused'}">${used?'in use':'unused'}</span></div>
+</div>`}).join('')+'</div>';
+  const re=$('#dash-reclaimable');
+  if(re)re.textContent=reclaimable>0?`Reclaimable: ${fB(reclaimable)} from unused images`:'All images are in use.';
+}
+
+window.dockerPrune=async function(){
+  if(!confirm('Remove all unused Docker images, containers, and networks? This cannot be undone.'))return;
+  const btn=$('#btn-docker-prune');if(btn){btn.disabled=true;btn.innerHTML='<span class="spinner"></span> Cleaning...'}
+  try{
+    const r=await api('/docker/prune',{method:'POST'});
+    const msg=`Cleaned up: ${r.imagesDeleted||0} images, ${r.containersDeleted?r.containersDeleted.length:0} containers. Reclaimed ${fB(r.spaceReclaimed||0)}.`;
+    toast(msg,'success');
+    setTimeout(fetchDash,1000);
+  }catch(e){toast('Prune failed: '+e.message,'error')}
+  finally{if(btn){btn.disabled=false;btn.textContent='Clean Up'}}
+};
+
 window.dashAct=async function(a){
   const b=$(`#btn-${a}-stack`);if(b)b.disabled=true;
   // Show a temporary inline terminal for streaming output
@@ -198,6 +248,493 @@ window.contAct=async function(name,a){
   try{await api(`/containers/${encodeURIComponent(name)}/${a}`,{method:'POST'});toast(`${name}: ${a} OK`,'success');setTimeout(fetchDash,1500)}
   catch(e){toast(`${name}: ${e.message}`,'error')}
 };
+
+// ============ STACKS (MULTI-STACK DOCKER COMPOSE) ============
+function pgStacks(){
+  $('#main-content').innerHTML=`<div class="page-header"><h1 class="page-title">Stacks</h1>
+<div class="page-actions"><button class="btn btn-sm btn-primary" onclick="stackNewModal()">${ic.plus} New Stack</button></div></div>
+<div class="stack-grid" id="stack-grid">${skel(3)}</div>`;
+  startPoll(fetchStacks,5000);
+}
+
+async function fetchStacks(){
+  try{
+    const d=await api('/stacks');
+    const stacks=d.stacks||[];
+    const g=$('#stack-grid');if(!g)return;
+    if(!stacks.length){
+      g.innerHTML=`<div class="stack-card stack-card-new" onclick="stackNewModal()"><div style="text-align:center;color:var(--tx-d)"><div style="font-size:2rem;margin-bottom:8px">+</div><div>Create your first stack</div></div></div>`;
+      return;
+    }
+    let h='';
+    stacks.forEach(s=>{
+      const running=s.containers?s.containers.filter(c=>c.status==='running').length:0;
+      const total=s.containers?s.containers.length:0;
+      const stCls=s.status==='running'?'stack-running':s.status==='partial'?'stack-partial':'stack-stopped';
+      const dotCls=s.status==='running'?'status-running':s.status==='partial'?'status-restarting':'status-stopped';
+      h+=`<div class="stack-card ${stCls}">
+<div class="stack-status"><span class="container-status ${dotCls}"><span class="dot"></span>${esc(s.status)}</span></div>
+<div style="font-size:1.1rem;font-weight:600;margin-bottom:4px">${esc(s.name)}</div>
+<div class="dim" style="font-size:.82rem;margin-bottom:12px">${total} container${total!==1?'s':''} ${running>0?`(${running} running)`:''}</div>
+<div class="stack-actions">
+<button class="btn btn-sm btn-primary" onclick="stackAct('${esc(s.name)}','start')" title="Start">${ic.play}</button>
+<button class="btn btn-sm btn-danger" onclick="stackAct('${esc(s.name)}','stop')" title="Stop">${ic.stop}</button>
+<button class="btn btn-sm btn-secondary" onclick="stackAct('${esc(s.name)}','restart')" title="Restart">${ic.restart}</button>
+<button class="btn btn-sm btn-secondary" onclick="stackAct('${esc(s.name)}','pull')" title="Pull">${ic.dl}</button>
+<button class="btn btn-sm btn-secondary" onclick="pgStackDetail('${esc(s.name)}')" title="Edit"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+</div></div>`;
+    });
+    h+=`<div class="stack-card stack-card-new" onclick="stackNewModal()"><div style="text-align:center;color:var(--tx-d)"><div style="font-size:2rem;margin-bottom:8px">+</div><div>New Stack</div></div></div>`;
+    g.innerHTML=h;
+  }catch(e){const g=$('#stack-grid');if(g)g.innerHTML=`<div class="empty-state"><h3>Failed to load stacks</h3><p>${esc(e.message)}</p></div>`}
+}
+
+window.stackAct=async function(name,action){
+  _showStackTerminal(name,action);
+  try{
+    const resp=await fetch(`${API}/stacks/${encodeURIComponent(name)}/${action}`,{method:'POST'});
+    if(!resp.ok){const err=await resp.json().catch(()=>({error:'HTTP '+resp.status}));if(_stackTerm)_stackTerm.writeLine('Error: '+(err.error||'failed'),'err');return}
+    const reader=resp.body.getReader();
+    const decoder=new TextDecoder();
+    let buffer='';
+    while(true){
+      const{done,value}=await reader.read();
+      if(done)break;
+      buffer+=decoder.decode(value,{stream:true});
+      const parts=buffer.split('\n\n');buffer=parts.pop();
+      for(const part of parts){
+        const line=part.replace(/^data: /,'').trim();if(!line)continue;
+        try{const data=JSON.parse(line);
+          if(data.type==='complete'){
+            if(data.success){if(_stackTerm)_stackTerm.writeLine(action+' completed successfully.','ok');toast(`${name}: ${action} completed`,'success')}
+            else{if(_stackTerm)_stackTerm.writeLine('Failed: '+(data.error||'unknown'),'err');toast(`${name}: ${action} failed`,'error')}
+          }else{if(_stackTerm)_stackTerm.writeLine(data.line||'',data.type==='error'?'err':data.type==='success'?'ok':'')}
+        }catch{if(line&&_stackTerm)_stackTerm.write(line)}
+      }
+    }
+    setTimeout(fetchStacks,1500);
+  }catch(e){if(_stackTerm)_stackTerm.writeLine('Error: '+e.message,'err')}
+};
+
+function _showStackTerminal(name,action){
+  let panel=$('#stack-terminal-panel');
+  if(!panel){
+    panel=document.createElement('div');panel.id='stack-terminal-panel';panel.className='stack-terminal';
+    panel.innerHTML=`<div class="stack-terminal-header"><span id="stack-term-title">Output: ${esc(name)}</span><button class="btn-icon" onclick="_closeStackTerm()" title="Close"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div id="stack-term-body" class="stack-terminal-body"></div>`;
+    document.body.appendChild(panel);
+  }else{
+    const title=$('#stack-term-title');if(title)title.textContent='Output: '+name;
+  }
+  if(!_stackTerm){
+    const body=$('#stack-term-body');
+    _stackTerm={
+      body:body,lines:[],autoScroll:true,
+      writeLine(text,type){const l=document.createElement('div');if(type)l.className='line-'+type;l.textContent=text;body.appendChild(l);if(this.lines.length>500){const old=this.lines.shift();old.remove()}this.lines.push(l);if(this.autoScroll)body.scrollTop=body.scrollHeight},
+      write(text){text.split('\n').forEach(l=>{if(l.trim())this.writeLine(l)})},
+      clear(){body.innerHTML='';this.lines=[]},
+      destroy(){body.innerHTML='';this.lines=[]}
+    };
+  }else{_stackTerm.clear()}
+  _stackTerm.writeLine(`Running ${action} on ${name}...`,'info');
+}
+window._closeStackTerm=_closeStackTerm;
+
+// ============ STACK DETAIL PAGE ============
+function pgStackDetail(name){
+  stopPoll();_closeStackTerm();cur='stacks';
+  $$('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.page==='stacks'));
+  const m=$('#main-content');
+  m.innerHTML=`<div style="margin-bottom:16px"><button class="btn btn-sm btn-secondary" onclick="pgStacks()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg> Back to Stacks</button></div>
+<div id="stack-detail-header"><h1 class="page-title">${esc(name)}</h1></div>
+<div class="stack-tabs" id="stack-tabs">
+<div class="stack-tab active" data-tab="containers" onclick="stackTab('containers')">Containers</div>
+<div class="stack-tab" data-tab="compose" onclick="stackTab('compose')">Compose</div>
+<div class="stack-tab" data-tab="env" onclick="stackTab('env')">Env</div>
+<div class="stack-tab" data-tab="logs" onclick="stackTab('logs')">Logs</div>
+</div>
+<div id="stack-tab-content">${skel(1)}</div>`;
+  window._stackDetailName=name;
+  loadStackDetail(name);
+}
+window.pgStackDetail=pgStackDetail;
+
+async function loadStackDetail(name){
+  try{
+    const d=await api(`/stacks/${encodeURIComponent(name)}`);
+    window._stackData=d;
+    const running=d.containers?d.containers.filter(c=>c.status==='running').length:0;
+    const total=d.containers?d.containers.length:0;
+    const dotCls=d.status==='running'?'status-running':d.status==='partial'?'status-restarting':'status-stopped';
+    const hdr=$('#stack-detail-header');
+    if(hdr)hdr.innerHTML=`<div class="page-header"><h1 class="page-title">${esc(name)}</h1><span class="container-status ${dotCls}" style="font-size:.85rem"><span class="dot"></span>${esc(d.status)} (${running}/${total})</span></div>`;
+    stackTab('containers');
+  }catch(e){$('#stack-tab-content').innerHTML=`<div class="empty-state"><h3>Failed to load stack</h3><p>${esc(e.message)}</p></div>`}
+}
+
+window.stackTab=function(tab){
+  $$('.stack-tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===tab));
+  const c=$('#stack-tab-content');if(!c)return;
+  const d=window._stackData||{};const name=window._stackDetailName;
+  if(tab==='compose')renderComposeTab(c,d,name);
+  else if(tab==='containers')renderContainersTab(c,d,name);
+  else if(tab==='logs')renderLogsTab(c,d,name);
+  else if(tab==='env')renderEnvTab(c,d,name);
+};
+
+function renderComposeTab(c,d,name){
+  c.innerHTML=`<div class="form-hint" style="margin-bottom:12px;padding:8px 12px;background:var(--surface-1);border-radius:var(--r-md);border:1px solid var(--bdr)">Volume paths for this stack: <strong>/dockerapps/${esc(name)}/</strong> &mdash; Example: <code>/dockerapps/${esc(name)}/config:/config</code></div>
+<div style="margin-bottom:16px"><div class="editor-container" style="min-height:300px"><div class="editor-wrap"><div class="line-numbers" id="stack-line-numbers" aria-hidden="true"></div>
+<textarea id="stack-compose-editor" class="compose-textarea" style="min-height:280px" spellcheck="false" placeholder="Paste docker-compose.yml...">${esc(d.compose||'')}</textarea></div></div></div>
+<div id="stack-mount-checkboxes" style="margin-bottom:16px"></div>
+<div style="display:flex;gap:8px;flex-wrap:wrap">
+<button class="btn btn-sm btn-secondary" onclick="stackSaveCompose()">${ic.save} Save</button>
+<button class="btn btn-sm btn-primary" onclick="stackAct('${esc(name)}','deploy')">${ic.send} Deploy</button>
+<button class="btn btn-sm btn-danger" onclick="stackDelete('${esc(name)}')" style="margin-left:auto">Delete Stack</button>
+</div>`;
+  const ta=$('#stack-compose-editor');
+  if(ta){
+    ta.addEventListener('input',()=>_updateStackLineNums());
+    ta.addEventListener('scroll',()=>{const ln=$('#stack-line-numbers');if(ln)ln.scrollTop=ta.scrollTop});
+    ta.addEventListener('keydown',e=>{if(e.key==='Tab'){e.preventDefault();const s=ta.selectionStart,en=ta.selectionEnd;ta.value=ta.value.substring(0,s)+'  '+ta.value.substring(en);ta.selectionStart=ta.selectionEnd=s+2;_updateStackLineNums()}});
+    _updateStackLineNums();
+  }
+  loadStackMountCheckboxes(name,d.requiredMounts||[]);
+}
+
+function _updateStackLineNums(){
+  const ta=$('#stack-compose-editor'),ln=$('#stack-line-numbers');if(!ta||!ln)return;
+  const lines=ta.value.split('\n').length;let h='';for(let i=1;i<=lines;i++)h+=i+'\n';ln.textContent=h;
+}
+
+async function loadStackMountCheckboxes(name,selected){
+  try{
+    const d=await api('/mounts'),ms=d.mounts||d||[];
+    const el=$('#stack-mount-checkboxes');if(!el)return;
+    if(!ms.length){el.innerHTML='';return}
+    const mountNames=ms.map(m=>m.mountpoint?m.mountpoint.split('/').pop():m.id);
+    el.innerHTML=`<div style="font-size:.82rem;font-weight:600;color:var(--tx-d);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Required Mounts</div>
+<div style="display:flex;flex-wrap:wrap;gap:12px">${mountNames.map(mn=>`<label style="display:flex;align-items:center;gap:6px;font-size:.88rem;cursor:pointer"><input type="checkbox" class="stack-mount-cb" value="${esc(mn)}" ${selected.includes(mn)?'checked':''} onchange="stackSaveMounts('${esc(name)}')">${esc(mn)}</label>`).join('')}</div>`;
+  }catch{}
+}
+
+window.stackSaveMounts=async function(name){
+  const cbs=$$('.stack-mount-cb');
+  const mounts=cbs.filter(cb=>cb.checked).map(cb=>cb.value);
+  try{await api(`/stacks/${encodeURIComponent(name)}/mounts`,{method:'PUT',body:{mounts}});toast('Mount requirements updated','success')}
+  catch(e){toast('Failed: '+e.message,'error')}
+};
+
+window.stackSaveCompose=async function(){
+  const name=window._stackDetailName;if(!name)return;
+  const ta=$('#stack-compose-editor');if(!ta)return;
+  try{await api(`/stacks/${encodeURIComponent(name)}`,{method:'PUT',body:{compose:ta.value}});toast('Compose file saved','success')}
+  catch(e){toast('Save failed: '+e.message,'error')}
+};
+
+window.stackDelete=async function(name){
+  if(!confirm(`Delete stack "${name}"?\n\nThis will stop all containers and remove the stack directory. This cannot be undone.`))return;
+  try{await api(`/stacks/${encodeURIComponent(name)}`,{method:'DELETE'});toast(`Stack ${name} deleted`,'success');pgStacks()}
+  catch(e){toast('Delete failed: '+e.message,'error')}
+};
+
+function renderContainersTab(c,d){
+  const containers=d.containers||[];
+  if(!containers.length){c.innerHTML='<div class="empty-state"><h3>No containers</h3><p>Deploy this stack to create containers.</p></div>';return}
+  c.innerHTML=`<table class="fb-table"><thead><tr><th>Name</th><th>Image</th><th>Status</th><th>Ports</th><th>Actions</th></tr></thead>
+<tbody>${containers.map(ct=>{
+    const stCls=ct.status==='running'?'status-running':'status-stopped';
+    return`<tr class="fb-row"><td style="font-weight:600">${esc(ct.name)}</td><td class="mono dim">${esc(ct.image)}</td>
+<td><span class="container-status ${stCls}"><span class="dot"></span>${esc(ct.status)}</span></td>
+<td class="mono dim" style="font-size:.8rem">${esc(ct.ports||'')}</td>
+<td><button class="btn btn-sm btn-secondary" onclick="stackRestartContainer('${esc(ct.name)}')">${ic.restart}</button></td></tr>`}).join('')}</tbody></table>`;
+}
+
+window.stackRestartContainer=async function(containerName){
+  try{await api('/stacks/container/restart',{method:'POST',body:{container:containerName}});toast(`Restarted ${containerName}`,'success');
+    const name=window._stackDetailName;if(name)loadStackDetail(name)}
+  catch(e){toast('Restart failed: '+e.message,'error')}
+};
+
+function renderLogsTab(c,d,name){
+  c.innerHTML=`<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+<select class="form-input" id="stack-log-container" style="max-width:200px" onchange="stackReconnectLogs()">
+<option value="all">All Containers</option>
+${(d.containers||[]).map(ct=>`<option value="${esc(ct.name)}">${esc(ct.name)}</option>`).join('')}
+</select>
+<button class="btn btn-sm btn-secondary" id="stack-log-pause" onclick="stackToggleLogPause()">Pause</button>
+<button class="btn btn-sm btn-secondary" onclick="stackReconnectLogs()">Reconnect</button>
+</div>
+<div id="stack-log-body" style="background:var(--bg-inp);border:1px solid var(--bdr);border-radius:var(--r-md);padding:12px 16px;font-family:var(--mono);font-size:.8rem;line-height:1.5;max-height:500px;overflow-y:auto;white-space:pre-wrap;color:var(--tx-d)"></div>`;
+  window._stackLogPaused=false;
+  stackConnectLogs(name);
+}
+
+function stackConnectLogs(name){
+  if(_stackLogWs){_stackLogWs.close();_stackLogWs=null}
+  const sel=$('#stack-log-container');
+  const container=sel?sel.value:'all';
+  const proto=location.protocol==='https:'?'wss':'ws';
+  const url=`${proto}://${location.host}/api/stacks/${encodeURIComponent(name)}/logs?container=${encodeURIComponent(container)}`;
+  try{
+    _stackLogWs=new WebSocket(url);
+    const body=$('#stack-log-body');if(!body)return;
+    body.innerHTML='';
+    _stackLogWs.onmessage=e=>{
+      if(window._stackLogPaused)return;
+      try{const data=JSON.parse(e.data);
+        const line=document.createElement('div');line.textContent=data.data||'';
+        body.appendChild(line);
+        while(body.children.length>1000)body.firstChild.remove();
+        body.scrollTop=body.scrollHeight;
+      }catch{const line=document.createElement('div');line.textContent=e.data;body.appendChild(line);body.scrollTop=body.scrollHeight}
+    };
+    _stackLogWs.onclose=()=>{const line=document.createElement('div');line.className='line-warn';line.textContent='Log stream disconnected';if(body)body.appendChild(line)};
+    _stackLogWs.onerror=()=>{};
+  }catch{}
+}
+
+window.stackReconnectLogs=function(){
+  const name=window._stackDetailName;if(name)stackConnectLogs(name);
+};
+window.stackToggleLogPause=function(){
+  window._stackLogPaused=!window._stackLogPaused;
+  const btn=$('#stack-log-pause');if(btn)btn.textContent=window._stackLogPaused?'Resume':'Pause';
+};
+
+function renderEnvTab(c,d,name){
+  c.innerHTML=`<div class="form-hint" style="margin-bottom:12px">Environment variables in KEY=VALUE format, one per line.</div>
+<textarea id="stack-env-editor" class="compose-textarea" style="min-height:200px;background:var(--bg-inp);border:1px solid var(--bdr);border-radius:var(--r-md);padding:16px" spellcheck="false" placeholder="KEY=value">${esc(d.env||'')}</textarea>
+<div style="margin-top:12px"><button class="btn btn-sm btn-secondary" onclick="stackSaveEnv('${esc(name)}')">${ic.save} Save</button></div>`;
+}
+
+window.stackSaveEnv=async function(name){
+  const ta=$('#stack-env-editor');if(!ta)return;
+  try{await api(`/stacks/${encodeURIComponent(name)}`,{method:'PUT',body:{env:ta.value}});toast('Environment saved','success')}
+  catch(e){toast('Save failed: '+e.message,'error')}
+};
+
+// ============ NEW STACK MODAL ============
+window.stackNewModal=function(){
+  const existing=$('#stack-new-overlay');if(existing)existing.remove();
+  const overlay=document.createElement('div');overlay.id='stack-new-overlay';overlay.className='wizard-overlay wizard-visible';
+  overlay.innerHTML=`<div class="wizard-card" style="max-width:700px">
+<div class="wizard-header"><div class="wizard-title">New Stack</div>
+<button class="wizard-close" onclick="document.getElementById('stack-new-overlay').remove()"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
+<div class="wizard-body">
+<div class="form-group"><label class="form-label">App Name</label><input class="form-input" id="stack-new-name" placeholder="my-app" oninput="this.value=this.value.toLowerCase().replace(/[^a-z0-9-]/g,'');stackNewNameHint()">
+<div id="stack-new-name-hint" class="form-hint hidden" style="margin-top:6px"></div></div>
+<div class="form-group"><label class="form-label">Start From</label>
+<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:4px">
+<label class="wizard-role-btn role-active" onclick="stackNewMode('paste',this)"><input type="radio" name="stack-new-mode" value="paste" checked>Paste YAML</label>
+<label class="wizard-role-btn" onclick="stackNewMode('upload',this)"><input type="radio" name="stack-new-mode" value="upload">Upload File</label>
+<label class="wizard-role-btn" onclick="stackNewMode('convert',this)"><input type="radio" name="stack-new-mode" value="convert">Convert docker run</label>
+</div></div>
+<div id="stack-new-compose-area">
+<div class="form-group"><label class="form-label">docker-compose.yml</label>
+<textarea id="stack-new-compose" class="compose-textarea" style="min-height:200px;background:var(--bg-inp);border:1px solid var(--bdr);border-radius:var(--r-md);padding:12px" spellcheck="false" placeholder="services:\n  app:\n    image: nginx:latest\n    ports:\n      - '80:80'"></textarea></div>
+</div>
+<div id="stack-new-upload-area" class="hidden">
+<div class="form-group"><label class="form-label">Upload docker-compose.yml</label>
+<label class="btn btn-sm btn-secondary" style="cursor:pointer">${ic.ul} Choose File<input type="file" accept=".yml,.yaml" style="display:none" onchange="stackNewUpload(this)"></label>
+<span id="stack-new-upload-name" class="dim" style="margin-left:8px"></span></div>
+</div>
+<div id="stack-new-convert-area" class="hidden">
+<div class="form-group"><label class="form-label">docker run command</label>
+<textarea id="stack-new-docker-run" class="compose-textarea" style="min-height:100px;background:var(--bg-inp);border:1px solid var(--bdr);border-radius:var(--r-md);padding:12px" spellcheck="false" placeholder="docker run -d --name myapp -p 80:80 -v /data:/data nginx:latest"></textarea>
+<button class="btn btn-sm btn-primary" style="margin-top:8px" onclick="stackConvertRun()">Convert</button></div>
+<div id="stack-new-convert-preview" class="hidden">
+<label class="form-label">Generated Compose</label>
+<textarea id="stack-new-convert-result" class="compose-textarea" style="min-height:150px;background:var(--bg-inp);border:1px solid var(--bdr);border-radius:var(--r-md);padding:12px" spellcheck="false"></textarea>
+</div></div>
+<div class="form-group"><label class="form-label">.env (optional)</label>
+<textarea id="stack-new-env" class="compose-textarea" style="min-height:80px;background:var(--bg-inp);border:1px solid var(--bdr);border-radius:var(--r-md);padding:12px" spellcheck="false" placeholder="KEY=value"></textarea></div>
+</div>
+<div class="wizard-footer"><div class="wizard-footer-left"></div><div class="wizard-footer-right">
+<button class="btn btn-secondary" onclick="document.getElementById('stack-new-overlay').remove()">Cancel</button>
+<button class="btn btn-primary" onclick="stackNewCreate()">Create Stack</button>
+</div></div></div>`;
+  document.body.appendChild(overlay);
+};
+
+window.stackNewNameHint=function(){
+  const name=$('#stack-new-name');const hint=$('#stack-new-name-hint');
+  if(!name||!hint)return;
+  const n=name.value.trim();
+  if(n){
+    hint.classList.remove('hidden');
+    hint.innerHTML='Volume paths for this app should use: <strong>/dockerapps/'+esc(n)+'/</strong><br>Example: <code>/dockerapps/'+esc(n)+'/config:/config</code>';
+  }else{hint.classList.add('hidden')}
+};
+
+window.stackNewMode=function(mode,el){
+  $$('#stack-new-overlay .wizard-role-btn').forEach(b=>b.classList.remove('role-active'));
+  if(el)el.classList.add('role-active');
+  $('#stack-new-compose-area').classList.toggle('hidden',mode==='upload'||mode==='convert');
+  $('#stack-new-upload-area').classList.toggle('hidden',mode!=='upload');
+  $('#stack-new-convert-area').classList.toggle('hidden',mode!=='convert');
+  if(mode==='paste'){
+    const ta=$('#stack-new-compose');if(ta)ta.focus();
+  }
+};
+
+window.stackNewUpload=function(input){
+  const file=input.files[0];if(!file)return;
+  const nameSpan=$('#stack-new-upload-name');if(nameSpan)nameSpan.textContent=file.name;
+  const reader=new FileReader();
+  reader.onload=e=>{
+    const ta=$('#stack-new-compose');if(ta)ta.value=e.target.result;
+    stackNewMode('paste',null);
+    $$('#stack-new-overlay .wizard-role-btn').forEach(b=>{
+      const r=b.querySelector('input');if(r&&r.value==='paste')b.classList.add('role-active');else b.classList.remove('role-active');
+    });
+  };
+  reader.readAsText(file);
+};
+
+window.stackConvertRun=function(){
+  const input=$('#stack-new-docker-run');if(!input)return;
+  const nameEl=$('#stack-new-name');
+  const appName=nameEl?nameEl.value.trim():'';
+  const yaml=convertDockerRun(input.value,appName);
+  if(!yaml){toast('Could not parse docker run command','error');return}
+  const preview=$('#stack-new-convert-preview');if(preview)preview.classList.remove('hidden');
+  const result=$('#stack-new-convert-result');if(result)result.value=yaml;
+};
+
+window.stackNewCreate=async function(){
+  const nameEl=$('#stack-new-name');if(!nameEl)return;
+  const name=nameEl.value.trim();
+  if(!name){toast('Stack name is required','error');return}
+  // Get compose content from either the main textarea or the convert result
+  let compose='';
+  const convertResult=$('#stack-new-convert-result');
+  const mainCompose=$('#stack-new-compose');
+  if(convertResult&&!$('#stack-new-convert-area').classList.contains('hidden')&&convertResult.value.trim()){
+    compose=convertResult.value;
+  }else if(mainCompose){
+    compose=mainCompose.value;
+  }
+  if(!compose.trim()){toast('Compose content is required','error');return}
+  const envEl=$('#stack-new-env');
+  const env=envEl?envEl.value:'';
+  try{
+    await api('/stacks',{method:'POST',body:{name,compose,env}});
+    toast(`Stack ${name} created`,'success');
+    const overlay=$('#stack-new-overlay');if(overlay)overlay.remove();
+    pgStacks();
+  }catch(e){toast('Create failed: '+e.message,'error')}
+};
+
+// ============ DOCKER RUN CONVERTER (CLIENT-SIDE) ============
+function convertDockerRun(cmd,appName){
+  if(!cmd||!cmd.trim())return null;
+  cmd=cmd.trim();
+  // Remove leading 'docker run' or 'docker create'
+  cmd=cmd.replace(/^(sudo\s+)?docker\s+(run|create)\s+/i,'');
+  // Normalize: remove backslash line continuations before tokenizing
+  cmd=cmd.replace(/\\\s*\n\s*/g,' ').replace(/\\\s*\r\n?\s*/g,' ');
+  // Collapse multiple spaces
+  cmd=cmd.replace(/\s+/g,' ').trim();
+  // Parse tokens respecting quotes
+  const tokens=[];let current='',inQ=false,qChar='';
+  for(let i=0;i<cmd.length;i++){
+    const ch=cmd[i];
+    if(inQ){if(ch===qChar){inQ=false}else{current+=ch}}
+    else if(ch==='"'||ch==="'"){inQ=true;qChar=ch}
+    else if(ch===' '||ch==='\t'){if(current){tokens.push(current);current=''}}
+    else{current+=ch}
+  }
+  if(current)tokens.push(current);
+  if(!tokens.length)return null;
+
+  const svc={};const networks=[];
+  let image=null,command=[];let i=0;
+  while(i<tokens.length){
+    const t=tokens[i];
+    if(t==='-d'||t==='--detach'){i++;continue}
+    if(t==='--name'&&tokens[i+1]){svc.container_name=tokens[++i];i++;continue}
+    if((t==='-p'||t==='--publish')&&tokens[i+1]){if(!svc.ports)svc.ports=[];svc.ports.push(tokens[++i]);i++;continue}
+    if(t.startsWith('-p=')){ if(!svc.ports)svc.ports=[];svc.ports.push(t.slice(3));i++;continue}
+    if((t==='-v'||t==='--volume')&&tokens[i+1]){if(!svc.volumes)svc.volumes=[];svc.volumes.push(tokens[++i]);i++;continue}
+    if(t.startsWith('-v=')){ if(!svc.volumes)svc.volumes=[];svc.volumes.push(t.slice(3));i++;continue}
+    if((t==='-e'||t==='--env')&&tokens[i+1]){if(!svc.environment)svc.environment=[];svc.environment.push(tokens[++i]);i++;continue}
+    if(t.startsWith('-e=')){ if(!svc.environment)svc.environment=[];svc.environment.push(t.slice(3));i++;continue}
+    if(t==='--env-file'&&tokens[i+1]){svc.env_file=tokens[++i];i++;continue}
+    if(t==='--restart'&&tokens[i+1]){svc.restart=tokens[++i];i++;continue}
+    if(t.startsWith('--restart=')){svc.restart=t.split('=',2)[1];i++;continue}
+    if(t==='--network'&&tokens[i+1]){networks.push(tokens[++i]);i++;continue}
+    if(t.startsWith('--network=')){networks.push(t.split('=',2)[1]);i++;continue}
+    if(t==='--privileged'){svc.privileged=true;i++;continue}
+    if(t==='--cap-add'&&tokens[i+1]){if(!svc.cap_add)svc.cap_add=[];svc.cap_add.push(tokens[++i]);i++;continue}
+    if(t==='--label'&&tokens[i+1]){if(!svc.labels)svc.labels=[];svc.labels.push(tokens[++i]);i++;continue}
+    if((t==='-w'||t==='--workdir')&&tokens[i+1]){svc.working_dir=tokens[++i];i++;continue}
+    if(t==='--hostname'&&tokens[i+1]){svc.hostname=tokens[++i];i++;continue}
+    if(t==='--user'&&tokens[i+1]){svc.user=tokens[++i];i++;continue}
+    if(t==='--entrypoint'&&tokens[i+1]){svc.entrypoint=tokens[++i];i++;continue}
+    if((t==='-m'||t==='--memory')&&tokens[i+1]){if(!svc.deploy)svc.deploy={resources:{limits:{}}};svc.deploy.resources.limits.memory=tokens[++i];i++;continue}
+    if(t==='--cpus'&&tokens[i+1]){if(!svc.deploy)svc.deploy={resources:{limits:{}}};svc.deploy.resources.limits.cpus=tokens[++i];i++;continue}
+    // Skip unknown flags
+    if(t.startsWith('-')&&!t.startsWith('-/')){
+      // Check if next token is a value (not a flag)
+      if(tokens[i+1]&&!tokens[i+1].startsWith('-'))i++;
+      i++;continue;
+    }
+    // First non-flag token is the image
+    if(!image){image=t;i++;continue}
+    // Remaining tokens are the command
+    command.push(t);i++;
+  }
+  if(!image)return null;
+  svc.image=image;
+  if(command.length)svc.command=command.join(' ');
+  if(networks.length){svc.networks=networks}
+
+  // Build YAML
+  const serviceName=svc.container_name||image.split(':')[0].split('/').pop()||'app';
+  let yaml='services:\n  '+serviceName+':\n';
+  yaml+='    image: '+svc.image+'\n';
+  if(svc.container_name)yaml+='    container_name: '+svc.container_name+'\n';
+  if(svc.command)yaml+='    command: '+svc.command+'\n';
+  if(svc.entrypoint)yaml+='    entrypoint: '+svc.entrypoint+'\n';
+  if(svc.restart)yaml+='    restart: '+svc.restart+'\n';
+  if(svc.hostname)yaml+='    hostname: '+svc.hostname+'\n';
+  if(svc.user)yaml+='    user: "'+svc.user+'"\n';
+  if(svc.working_dir)yaml+='    working_dir: '+svc.working_dir+'\n';
+  if(svc.privileged)yaml+='    privileged: true\n';
+  if(svc.env_file)yaml+='    env_file: '+svc.env_file+'\n';
+  if(svc.ports){yaml+='    ports:\n';svc.ports.forEach(p=>yaml+='      - "'+p+'"\n')}
+  if(svc.volumes){yaml+='    volumes:\n';svc.volumes.forEach(v=>{
+    // Auto-rewrite volume host paths to /dockerapps/APPNAME/ when app name is set
+    if(appName){
+      const parts=v.split(':');
+      if(parts.length>=2){
+        let hostPath=parts[0];
+        // Rewrite absolute paths that aren't already under /dockerapps
+        if(hostPath.startsWith('/')&&!hostPath.startsWith('/dockerapps/')){
+          const dirName=hostPath.split('/').filter(Boolean).pop()||'data';
+          parts[0]='/dockerapps/'+appName+'/'+dirName;
+        }
+        // Rewrite named volumes to local paths
+        else if(!hostPath.startsWith('/')&&!hostPath.startsWith('.')){
+          parts[0]='/dockerapps/'+appName+'/'+hostPath;
+        }
+        v=parts.join(':');
+      }
+    }
+    yaml+='      - '+v+'\n'})}
+  if(svc.environment){yaml+='    environment:\n';svc.environment.forEach(e=>yaml+='      - '+e+'\n')}
+  if(svc.cap_add){yaml+='    cap_add:\n';svc.cap_add.forEach(c=>yaml+='      - '+c+'\n')}
+  if(svc.labels){yaml+='    labels:\n';svc.labels.forEach(l=>yaml+='      - '+l+'\n')}
+  if(svc.networks){yaml+='    networks:\n';svc.networks.forEach(n=>yaml+='      - '+n+'\n')}
+  if(svc.deploy){
+    yaml+='    deploy:\n      resources:\n        limits:\n';
+    if(svc.deploy.resources.limits.memory)yaml+='          memory: '+svc.deploy.resources.limits.memory+'\n';
+    if(svc.deploy.resources.limits.cpus)yaml+='          cpus: "'+svc.deploy.resources.limits.cpus+'"\n';
+  }
+  // Add top-level networks if needed
+  if(networks.length){yaml+='\nnetworks:\n';networks.forEach(n=>yaml+='  '+n+':\n    external: true\n')}
+  return yaml;
+}
 
 // ============ COMPOSE EDITOR ============
 function pgCompose(){
@@ -267,9 +804,9 @@ Network Mounts
 Tips
 </h3>
 <ul class="sidebar-tips">
-<li>WraithOS boots from RAM. Only <code>/wraith/cache</code> and <code>/mnt/*</code> survive reboots (when on persistent disks).</li>
+<li>WraithOS boots from RAM. Only <code>/dockerapps</code> and <code>/remotemounts/*</code> survive reboots (when on persistent disks).</li>
 <li>Named Docker volumes are stored under <code>/wraith/cache</code> automatically.</li>
-<li>Use bind mounts for network storage: <code>/mnt/&lt;name&gt;:/container/path</code></li>
+<li>Use bind mounts for network storage: <code>/remotemounts/&lt;name&gt;:/container/path</code></li>
 <li>Set <code>restart: unless-stopped</code> so containers come back after reboot.</li>
 </ul>
 </div>
@@ -616,7 +1153,7 @@ function pgMounts(){
 <div class="form-group"><label class="form-label">Server</label><input class="form-input" id="mnt-server" placeholder="MYSERVER or 192.168.1.100"><div class="form-hint">Hostname or IP of the file server</div></div>
 <div class="form-group"><label class="form-label" id="mnt-share-label">Share</label><input class="form-input" id="mnt-share" placeholder="folder/path"><div class="form-hint" id="mnt-share-hint">Path relative to the share root</div></div>
 <div class="form-group"><label class="form-label">Mount Name</label><input class="form-input" id="mnt-name" placeholder="my-share" oninput="mntNameChanged()">
-<div class="form-hint" id="mnt-path-hint">Mounts at /mnt/&lt;name&gt;</div></div>
+<div class="form-hint" id="mnt-path-hint">Mounts at /remotemounts/&lt;name&gt;</div></div>
 <div id="mnt-creds-group">
 <div class="form-group"><label class="form-label">Username</label><input class="form-input" id="mnt-user" placeholder="optional"></div>
 <div class="form-group"><label class="form-label">Password</label><input class="form-input" id="mnt-pass" type="password" placeholder="optional"></div>
@@ -673,7 +1210,7 @@ window.mntTypeChanged=function(){
 window.mntNameChanged=function(){
   const v=$('#mnt-name').value;
   const hint=$('#mnt-path-hint');
-  if(hint)hint.textContent=v?`Mounts at /mnt/${v}`:'Mounts at /mnt/<name>';
+  if(hint)hint.textContent=v?`Mounts at /remotemounts/${v}`:'Mounts at /remotemounts/<name>';
 };
 window.addMnt=async function(){
   const t=document.querySelector('input[name="mnt-type"]:checked').value;

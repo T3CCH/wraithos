@@ -28,7 +28,10 @@ func ComposeDir() string { return filepath.Join(ConfigBase, "compose") }
 func ComposeFile() string { return filepath.Join(ComposeDir(), "docker-compose.yml") }
 
 // MountsDir returns the base directory for network mount points.
-func MountsDir() string { return "/mnt" }
+func MountsDir() string { return "/remotemounts" }
+
+// AppsDir returns the directory for Docker app data.
+func AppsDir() string { return "/dockerapps" }
 
 // AuthFile returns the path to the bcrypt-hashed credentials file.
 func AuthFile() string { return filepath.Join(ConfigBase, "auth.json") }

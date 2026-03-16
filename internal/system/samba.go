@@ -75,7 +75,7 @@ func (m *SambaManager) ListMounts() ([]SambaMount, error) {
 
 // AddMount adds a new network mount configuration.
 // The MountPoint field is treated as a mount name (e.g. "media") and the
-// actual mount path is constructed as /mnt/<name>.
+// actual mount path is constructed as /remotemounts/<name>.
 func (m *SambaManager) AddMount(mount SambaMount) (*SambaMount, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
