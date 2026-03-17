@@ -366,7 +366,7 @@ async function loadStackDetail(name,tab){
     const total=d.containers?d.containers.length:0;
     const dotCls=d.status==='running'?'status-running':d.status==='partial'?'status-restarting':'status-stopped';
     const hdr=$('#stack-detail-header');
-    if(hdr)hdr.innerHTML=`<div class="page-header"><h1 class="page-title">${esc(name)}</h1><span class="container-status ${dotCls}" style="font-size:.85rem"><span class="dot"></span>${esc(d.status)} (${running}/${total})</span></div>`;
+    if(hdr)hdr.innerHTML=`<div class="page-header"><h1 class="page-title">${esc(name)}</h1><span class="container-status ${dotCls}" style="font-size:.85rem"><span class="dot"></span>${esc(d.status)} (${running}/${total})</span><button class="btn btn-sm btn-danger" onclick="stackDelete('${esc(name)}')" style="margin-left:auto">Delete Stack</button></div>`;
     stackTab(tab||'containers');
   }catch(e){$('#stack-tab-content').innerHTML=`<div class="empty-state"><h3>Failed to load stack</h3><p>${esc(e.message)}</p></div>`}
 }
@@ -389,7 +389,6 @@ function renderComposeTab(c,d,name){
 <div style="display:flex;gap:8px;flex-wrap:wrap">
 <button class="btn btn-sm btn-secondary" onclick="stackSaveCompose()">${ic.save} Save</button>
 <button class="btn btn-sm btn-primary" onclick="stackAct('${esc(name)}','deploy')">${ic.send} Deploy</button>
-<button class="btn btn-sm btn-danger" onclick="stackDelete('${esc(name)}')" style="margin-left:auto">Delete Stack</button>
 </div>`;
   const ta=$('#stack-compose-editor');
   if(ta){
