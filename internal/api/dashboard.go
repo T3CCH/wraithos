@@ -42,6 +42,7 @@ type containerInfo struct {
 	State  string   `json:"state"`
 	Uptime float64  `json:"uptime"`
 	Ports  []string `json:"ports"`
+	Stack  string   `json:"stack,omitempty"`
 }
 
 type dashboardResponse struct {
@@ -150,6 +151,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 					Image: c.Image,
 					State: c.State,
 					Ports: ports,
+					Stack: c.Stack,
 				})
 			}
 		}

@@ -27,6 +27,7 @@ type ContainerInfo struct {
 	Status  string   `json:"status"`
 	Created string   `json:"created"`
 	Ports   []string `json:"ports"`
+	Stack   string   `json:"stack,omitempty"`
 }
 
 // Client wraps the Docker SDK client.
@@ -90,6 +91,7 @@ func (c *Client) ListContainers(ctx context.Context) ([]ContainerInfo, error) {
 			Status:  ctr.Status,
 			Created: time.Unix(ctr.Created, 0).Format(time.RFC3339),
 			Ports:   ports,
+			Stack:   ctr.Labels["com.docker.compose.project"],
 		})
 	}
 

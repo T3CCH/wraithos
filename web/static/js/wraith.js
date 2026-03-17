@@ -181,10 +181,10 @@ function updCont(cs){
 <button class="btn btn-sm btn-secondary" data-cont-action="restart" data-cont-name="${esc(c.name)}">Restart</button>
 ${c.state==='running'?`<button class="btn btn-sm btn-secondary" data-cont-action="stop" data-cont-name="${esc(c.name)}">Stop</button>`
 :`<button class="btn btn-sm btn-primary" data-cont-action="start" data-cont-name="${esc(c.name)}">Start</button>`}
-<button class="btn btn-sm btn-secondary" data-cont-action="logs" data-cont-name="${esc(c.name)}" style="margin-left:auto">Logs</button>
+<button class="btn btn-sm btn-secondary" data-cont-action="logs" data-cont-name="${esc(c.name)}" data-cont-stack="${esc(c.stack||'')}" style="margin-left:auto">Logs</button>
 </div></div>`).join('');
   // Event delegation for container action buttons
-  g.addEventListener('click',function(e){const btn=e.target.closest('[data-cont-action]');if(btn)contAct(btn.dataset.contName,btn.dataset.contAction)});
+  g.addEventListener('click',function(e){const btn=e.target.closest('[data-cont-action]');if(btn)contAct(btn.dataset.contName,btn.dataset.contAction,btn.dataset.contStack)});
 }
 
 function updStorage(s){
@@ -243,8 +243,8 @@ window.dashAct=async function(a){
   setTimeout(fetchDash,1000);
 };
 
-window.contAct=async function(name,a){
-  if(a==='logs'){navigate('compose');setTimeout(async()=>{if(_term){_term.clear();try{const d=await api(`/containers/${encodeURIComponent(name)}/logs`);_term.write(d.logs||d||'No logs')}catch(e){_term.writeLine(`Error: ${e.message}`,'err')}}},200);return}
+window.contAct=async function(name,a,stack){
+  if(a==='logs'){if(stack){pgStackDetail(stack,'logs');return}navigate('compose');setTimeout(async()=>{if(_term){_term.clear();try{const d=await api(`/containers/${encodeURIComponent(name)}/logs`);_term.write(d.logs||d||'No logs')}catch(e){_term.writeLine(`Error: ${e.message}`,'err')}}},200);return}
   try{await api(`/containers/${encodeURIComponent(name)}/${a}`,{method:'POST'});toast(`${name}: ${a} OK`,'success');setTimeout(fetchDash,1500)}
   catch(e){toast(`${name}: ${e.message}`,'error')}
 };
@@ -340,7 +340,7 @@ function _showStackTerminal(name,action){
 window._closeStackTerm=_closeStackTerm;
 
 // ============ STACK DETAIL PAGE ============
-function pgStackDetail(name){
+function pgStackDetail(name,tab){
   stopPoll();_closeStackTerm();cur='stacks';
   $$('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.page==='stacks'));
   const m=$('#main-content');
@@ -354,11 +354,11 @@ function pgStackDetail(name){
 </div>
 <div id="stack-tab-content">${skel(1)}</div>`;
   window._stackDetailName=name;
-  loadStackDetail(name);
+  loadStackDetail(name,tab);
 }
 window.pgStackDetail=pgStackDetail;
 
-async function loadStackDetail(name){
+async function loadStackDetail(name,tab){
   try{
     const d=await api(`/stacks/${encodeURIComponent(name)}`);
     window._stackData=d;
@@ -367,7 +367,7 @@ async function loadStackDetail(name){
     const dotCls=d.status==='running'?'status-running':d.status==='partial'?'status-restarting':'status-stopped';
     const hdr=$('#stack-detail-header');
     if(hdr)hdr.innerHTML=`<div class="page-header"><h1 class="page-title">${esc(name)}</h1><span class="container-status ${dotCls}" style="font-size:.85rem"><span class="dot"></span>${esc(d.status)} (${running}/${total})</span></div>`;
-    stackTab('containers');
+    stackTab(tab||'containers');
   }catch(e){$('#stack-tab-content').innerHTML=`<div class="empty-state"><h3>Failed to load stack</h3><p>${esc(e.message)}</p></div>`}
 }
 
@@ -427,7 +427,7 @@ window.stackSaveMounts=async function(name){
 window.stackSaveCompose=async function(){
   const name=window._stackDetailName;if(!name)return;
   const ta=$('#stack-compose-editor');if(!ta)return;
-  try{await api(`/stacks/${encodeURIComponent(name)}`,{method:'PUT',body:{compose:ta.value}});toast('Compose file saved','success')}
+  try{await api(`/stacks/${encodeURIComponent(name)}`,{method:'PUT',body:{compose:ta.value}});if(window._stackData)window._stackData.compose=ta.value;toast('Compose file saved','success')}
   catch(e){toast('Save failed: '+e.message,'error')}
 };
 
@@ -504,12 +504,12 @@ window.stackToggleLogPause=function(){
 function renderEnvTab(c,d,name){
   c.innerHTML=`<div class="form-hint" style="margin-bottom:12px">Environment variables in KEY=VALUE format, one per line.</div>
 <textarea id="stack-env-editor" class="compose-textarea" style="min-height:200px;background:var(--bg-inp);border:1px solid var(--bdr);border-radius:var(--r-md);padding:16px" spellcheck="false" placeholder="KEY=value">${esc(d.env||'')}</textarea>
-<div style="margin-top:12px"><button class="btn btn-sm btn-secondary" onclick="stackSaveEnv('${esc(name)}')">${ic.save} Save</button></div>`;
+<div style="margin-top:12px;display:flex;gap:8px"><button class="btn btn-sm btn-secondary" onclick="stackSaveEnv('${esc(name)}')">${ic.save} Save</button><button class="btn btn-sm btn-primary" onclick="stackAct('${esc(name)}','deploy')">${ic.send} Deploy</button></div>`;
 }
 
 window.stackSaveEnv=async function(name){
   const ta=$('#stack-env-editor');if(!ta)return;
-  try{await api(`/stacks/${encodeURIComponent(name)}`,{method:'PUT',body:{env:ta.value}});toast('Environment saved','success')}
+  try{await api(`/stacks/${encodeURIComponent(name)}`,{method:'PUT',body:{env:ta.value}});if(window._stackData)window._stackData.env=ta.value;toast('Environment saved','success')}
   catch(e){toast('Save failed: '+e.message,'error')}
 };
 

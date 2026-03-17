@@ -70,8 +70,8 @@ func (s *Server) handleStackGet(w http.ResponseWriter, r *http.Request, name str
 // handleStackUpdate updates a stack's compose and/or env files.
 func (s *Server) handleStackUpdate(w http.ResponseWriter, r *http.Request, name string) {
 	var req struct {
-		Compose string `json:"compose"`
-		Env     string `json:"env"`
+		Compose string  `json:"compose"`
+		Env     *string `json:"env"`
 	}
 	if err := decodeJSONLenient(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -85,8 +85,8 @@ func (s *Server) handleStackUpdate(w http.ResponseWriter, r *http.Request, name 
 		}
 	}
 
-	if req.Env != "" {
-		if err := s.Stacks.SaveEnv(name, req.Env); err != nil {
+	if req.Env != nil {
+		if err := s.Stacks.SaveEnv(name, *req.Env); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
